@@ -7,6 +7,7 @@ editor_options: "Sjoerd"
 ---
 
 ```{r}
+mypath <- ##PATH
 mytheme <- theme_bw()+
   theme(text = element_text(size=15),
         strip.background = element_blank(),
@@ -28,7 +29,7 @@ library(openxlsx)
 # --- 1. Read and clean the data ---
 
 # Read CSV
-Soil_parameters <- read.csv("G:/My Drive/CityDeal/Eurofins_results/Soil_analysis_for_statistics.csv", row.names = 1, sep = ";", dec = ".", na.strings = c("", " ", "<", "<0.5", "<1", "<1.1", "<0.1", "<200", "<150"))
+Soil_parameters <- read.csv(paste(mypath, "/Soil_analysis_for_statistics.csv", row.names = 1, sep = ";", dec = ".", na.strings = c("", " ", "<", "<0.5", "<1", "<1.1", "<0.1", "<200", "<150"))
 
 # Ensure Group is treated as a factor
 Soil_parameters$Group <- as.factor(Soil_parameters$Group)
@@ -114,10 +115,10 @@ addWorksheet(wb, "Group Means & ANOVA")
 addWorksheet(wb, "Tukey Posthoc")
 writeData(wb, "Group Means & ANOVA", summary_table)
 writeData(wb, "Tukey Posthoc", tukey_table)
-saveWorkbook(wb, "G:/My Drive/CityDeal/Eurofins_results/Soil_full_statistical_summary.xlsx", overwrite = TRUE)
+saveWorkbook(wb, paste(mypath, "/Soil_full_statistical_summary.xlsx", overwrite = TRUE)
 
 
-# write.csv(summary_table, "G:/My Drive/CityDeal/Eurofins_results/SUMMARY_STATS_SOIL")
+# write.csv(summary_table, paste(mypath, "/SUMMARY_STATS_SOIL")
 ```
 
 ```{r}
@@ -182,7 +183,7 @@ First we need to build the correlation model. The file beneath is a file of each
 rownames(my_data_corr) \<- make.unique(as.character(my_data_corr[, 1])) \# Ensure unique row names
 
 ```{r}
-my_data_corr=read.csv("G:/My Drive/CityDeal/Eurofins_results/Eurofins_soil_analysis_z-score.cs", header = T, row.names = 1)
+my_data_corr=read.csv(paste(mypath, "/Eurofins_soil_analysis_z-score.cs", header = T, row.names = 1)
 #rownames(my_data_corr) <- make.unique(as.character(my_data_corr[, 1]))  # Ensure unique row names
 #my_data_corr <- my_data_corr[, -1]  # Remove the first column if it's no longer needed as data
 ```
@@ -258,7 +259,7 @@ We will test if the values are multi-colinear with different alpha diversity ind
 library(webshot)
 
 #First we need a (generalized) linear model
-my_data_after_revision <- read.csv("G:/My Drive/CityDeal/Metadata/Soil_metadata_easy_zscore.csv", row.names = 1, sep=",")
+my_data_after_revision <- read.csv(paste(mypath, " Soil_metadata_easy_zscore.csv", row.names = 1, sep=",")
 
 ## For ITS
 #shannon
@@ -278,11 +279,11 @@ Model_Richness16s<- glm(Richness16S ~ RichnessITS + CN + N.Levering + P.totaal +
 Model_chao16s<- glm(Chao1.16s ~ Chao1ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
 
 ## A nice table visualisation (sjPlot package)
-tab_model(Model_RichnessITS)#, file ="G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model.html")
-tab_model(Model_Richness16s, file= "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model.html")
+tab_model(Model_RichnessITS)#, file =paste(mypath, " /tab_model.html")
+tab_model(Model_Richness16s, file= paste(mypath, " /tab_model.html")
 
-webshot("G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model.png")
-webshot("G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model.png")
+webshot(paste(mypath, " /tab_model.html", paste(mypath, " /tab_model.png")
+webshot(paste(mypath, " /tab_model.html", paste(mypath, " /tab_model.png")
 ## Non have a significant effect on Richnes (!!!!!)
 ```
 
@@ -292,7 +293,7 @@ TREES ONLY
 library(webshot)
 
 #First we need a (generalized) linear model
-my_data_after_revision <- read.csv("G:/My Drive/CityDeal/Metadata/Soil_metadata_easy_zscore_TREES.csv", row.names = 1, sep="\t")
+my_data_after_revision <- read.csv(paste(mypath, " Soil_metadata_easy_zscore_TREES.csv", row.names = 1, sep="\t")
 
 ## For ITS
 ## For ITS
@@ -313,12 +314,12 @@ Model_Richness16s<- glm(Richness.16S ~ Richness.ITS + CN + N.Levering + P.totaal
 Model_chao16s<- glm(Chao1.16s ~ Chao1.ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
 
 ## A nice table visualisation (sjPlot package)
-tab_model(Model_RichnessITS)#, file ="G:/My Drive/CityDeal/ITS-Sjoerd/ITS-11912/eurofins_soil/tab_model_TREES.html")
+tab_model(Model_RichnessITS)#, file =paste(mypath, " /tab_model_TREES.html")
 
-tab_model(Model_Richness16s, file= "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model_TREES.html")
+tab_model(Model_Richness16s, file= paste(mypath, " /tab_model_TREES.html")
 
-webshot("G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model_TREES.png")
-webshot("G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model_TREES.png")
+webshot(paste(mypath, " /tab_model.html", paste(mypath, " /tab_model_TREES.png")
+webshot(paste(mypath, " /tab_model.html", paste(mypath, " /tab_model_TREES.png")
 ```
 
 Still i am going to test for multi-colinearity, although I don't think it matters much now. As a rule of thumb, a VIF exceeding 5 requires further investigation, whereas VIFs above 10 indicate multicollinearity. Ideally, the Variance Inflation Factors are below 3.
@@ -341,10 +342,10 @@ We need to transform the ASV table(s) to normalize them or something (check). He
 
     ```{r}
     #For ITS:
-    ITS_ASV_table <- read.csv("G:/My Drive/CityDeal/ITS-Sjoerd/ITS-11912/ASV_ITS_rarefied11912.csv", header = T, row.names = 1)
+    ITS_ASV_table <- read.csv(paste(mypath, " /ASV_ITS_rarefied11912.csv", header = T, row.names = 1)
 
     #For 16s:
-    ASV_table_16s <- read.csv("G:/My Drive/CityDeal/16S - Panji/Sjoerd R - 40,000 reads/phyraresuball_asv_samplenames.csv", header = T, row.names = 1)
+    ASV_table_16s <- read.csv(paste(mypath, " phyraresuball_asv_samplenames.csv", header = T, row.names = 1)
 
     ```
 
@@ -352,7 +353,7 @@ We need to transform the ASV table(s) to normalize them or something (check). He
 
     ```{r}
     # This file does that:
-    metadata_filt <- read.csv("G:/My Drive/CityDeal/Metadata/soil_metadata_zscore_after_filtering_unpooled.csv", header = T, row.names = 1)
+    metadata_filt <- read.csv(paste(mypath, " soil_metadata_zscore_after_filtering_unpooled.csv", header = T, row.names = 1)
     ```
 
 ```{r}
@@ -576,7 +577,6 @@ R.sum$cont$importance[2, "RDA2"]
 # [1] 0.19804
 ```
 
-with help from chatGPT
 
 ```{r}
 library(ggplot2)
@@ -629,7 +629,7 @@ rda_plot <- ggplot() +
   mytheme
 rda_plot
 
-ggsave("G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/RDA_environement_16S.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave(paste(mypath, " /RDA_environement_16S.png",width = 15, height = 10, units = "in", dpi = 600)
 
 
 ```
@@ -721,7 +721,7 @@ rda_plot <- ggplot() +
 
 rda_plot
 
-ggsave("G:/My Drive/CityDeal/ITS-Sjoerd/ITS-11912/eurofins_soil/RDA_environement_ITS_Siltonly.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave(paste(mypath, " /RDA_environement_ITS_Siltonly.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ```
 
@@ -751,3 +751,4 @@ ggplot(sel.fs, aes(x = reorder(variables, -R2), y = R2)) +
   theme_minimal() +
   coord_flip()
 ```
+
