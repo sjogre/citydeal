@@ -1,7 +1,7 @@
 library(tidyverse)
 
 ## Setwd to where te files are
-setwd("G:/My Drive/CityDeal/Data_analysis_after_review/Input_data/FA data/")
+setwd("PATH") #CHANGE PATH
 ## Importing all files from fragment analyser, Stolen from Stackoverflow thanks to https://stackoverflow.com/questions/11433432/how-to-import-multiple-csv-files-at-once
 temp = list.files(pattern="\\.csv$")
 myfiles = lapply(temp, read.delim, sep = ",")
@@ -14,9 +14,8 @@ FA_all <- separate(FA_all,
               into = c("enumber","plate","wells"))
 subset(FA_all, enumber == "e1100038290")
 
-setwd("G:/My Drive/CityDeal/Data_analysis_after_review")
 ## Now I want to link the enumbers to the samples, to make a nice metadata table
-ASV_table_ITS <- read.csv("./Input_data/ITS_spring23_ASV.csv", row.names = 1, header = T)
+ASV_table_ITS <- read.csv("./Input_data/ASV table", row.names = 1, header = T)
 Sample_names_ITS <- as.data.frame(colnames(ASV_table_ITS))
 Sample_names_ITS$names <- Sample_names_ITS$`colnames(ASV_table_ITS)`
 Sample_names_ITS$`colnames(ASV_table_ITS)`<- NULL
@@ -61,3 +60,4 @@ Metadata_FA_ITS <- subset(Metadata_FA, marker == "ITS")
 write.csv(Metadata_FA_16S, "./Input_data/FA_metadata_16S.csv")
 write.csv(Metadata_FA_ITS, "./Input_data/FA_metadata_ITS.csv")
 write.csv(Metadata_FA, "./Input_data/FA_metadata_Full.csv")
+
