@@ -234,13 +234,13 @@ plot_grouped_taxa_bar <- function(ps_obj,
 ## 0.1 Decontam ITS phyloseq
 
 ```{r}
-otu_table=read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/Input_data/ITS_spring23_ASV_Unrarefied_simplefied.csv",row.names=1, header = T)
+otu_table=read.csv("path/ASV",row.names=1, header = T)
 head(otu_table)
 otu_table=as.matrix(otu_table)
 mean(colSums(otu_table))
 nrow(otu_table)
 
-taxonomy=read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/Input_data/080425-Taxa_list_all_eurkaryotes_and_ASVs.csv", row.names=1, header = T)
+taxonomy=read.csv("path/taxa", row.names=1, header = T)
 taxonomy$sequence <- NULL
 replace(taxonomy, taxonomy == " ", NA) -> tax1
 taxonomy1=as.matrix(tax1)
@@ -261,8 +261,8 @@ physeq_ITS_full_set=phyloseq(OTU, META, TAX)
 #settings
 theme_set(theme_bw())
 options(stringsAsFactors = FALSE)
-path.in <- "G:/My Drive/CityDeal/Data_analysis_after_review/Input_data" # CHANGE ME
-path.out <- "G:/My Drive/CityDeal/Data_analysis_after_review/Decntam" # CHANGE ME
+path.in <- "path/Input_data" # CHANGE ME
+path.out <- "path/Decntam" # CHANGE ME
 
 #color palettes
 cbbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000")
@@ -384,7 +384,7 @@ Filtering the metadata
 
 ```{r}
 physeq_ITS <- ps.noncontam
-metadata=read.csv("G:/My Drive/CityDeal/Metadata/Metadata_per_sample.csv", row.names=1)
+metadata=read.csv("path/Metadata_per_sample.csv", row.names=1)
 samples_stoep <- rownames(metadata[(metadata$topology == "Stoep_bomen"),])
 # In my case the metadata has multiple experiments in there. Here you could filter them on column
   metadata <- metadata[metadata$experiment=="CityDeal",]
@@ -428,7 +428,7 @@ rm(list=setdiff(ls(), "physeq_fungal_only"))
 
 ```{r}
 sequencing_depth <- as.data.frame(sample_sums(physeq_fungal_only))
-#write.csv(df, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS/ITSsequencing_depth_raw.csv")
+#write.csv(df, "path/ITSsequencing_depth_raw.csv")
 physeq_fungal_only_sub <- subset_samples(physeq_fungal_only, sample_sums(physeq_fungal_only)>=10000)
 # rarefy your dataset to lowest sequencing length or a custom number, 711 should be kept constant:
 phy_rare <- rarefy_even_depth(phy_rare,rngseed = 711, replace = F, trimOTUs = TRUE, 	verbose = F)
@@ -454,7 +454,7 @@ rarefaction_curve_ITS <- ITS_rarefaction_curve + mytheme +
     y ="Total ASVs"
     )
 rarefaction_curve_ITS
-ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_ITS_raw_test.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("G:pathRarefaction_ITS_raw_test.png",width = 15, height = 10, units = "in", dpi = 600)
 
 
 ## ITS rarefaction curve after rarefaction
@@ -467,7 +467,7 @@ rarefaction_curve_ITS_RF <- ITS_rarefaction_curve_RF10000 + mytheme +
     y ="Total ASVs"
     )
 rarefaction_curve_ITS_RF
-ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_ITS_RF11718_test.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("path/Rarefaction_ITS_RF11718_test.png",width = 15, height = 10, units = "in", dpi = 600)
 
 
 ```
@@ -492,7 +492,7 @@ Richnes_parameters <- estimate_richness(phy_rare, measures=c("Observed", "InvSim
 enriched_meta <- merge(as.data.frame(phy_rare@sam_data), Richnes_parameters, by = "row.names", all.x = TRUE)
 # And add groups (city-topology)
 enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
-write.csv(enriched_meta, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_enriched_meta_rarefied_test.csv")
+write.csv(enriched_meta, "path/ITS_enriched_meta_rarefied_test.csv")
 phy_rare@sam_data <- sample_data(enriched_meta)
 
 enriched_meta$topology = factor(enriched_meta$topology, levels = c("Treepit","Sidewalk_with_trees","Street_with_trees", "Sidewalk_without_trees", "Street_without_trees"))
@@ -518,7 +518,7 @@ richness_all_c <- ggplot(data = enriched_meta,
 richness_all_c
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Alpha_div_fig2.png", width = 15, height =10,units = "in", dpi = 600)
+ggsave("path/ITS_Alpha_div_fig2.png", width = 15, height =10,units = "in", dpi = 600)
 
 ## For each city and topology apart
 stats_rarefied_topo_city <- compare_variables_function(enriched_meta, "topology", "city", "Observed")
@@ -580,7 +580,7 @@ richness_all_c_unrar <- ggplot(data = enriched_meta,
         #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
 richness_all_c_unrar
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Alpha_div_unrar_supp.png", width = 15, height =10,
+ggsave("path/ITS_Alpha_div_unrar_supp.png", width = 15, height =10,
 units = "in", dpi = 600)
 
 ## For each city and topology apart
@@ -612,13 +612,13 @@ metadata_rarefied <- as.data.frame(sample_data(phy_rare))
 ## Don't ask me why, but had to transform it twice, because it wouldn't save it otherwise. So I just accepted it and moved on with my life.
 rownames(metadata_rarefied) <- metadata_rarefied$Row.names
 metadata_rarefied <- t(metadata_rarefied)
-write.csv(t(metadata_rarefied), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_rarefied_test.csv")
+write.csv(t(metadata_rarefied), path/ITS_metadata_rarefied_test.csv")
 
 
 metadata_unrarefied <- as.data.frame(sample_data(physeq_fungal_only))
 rownames(metadata_unrarefied) <- metadata_unrarefied$Row.names
 metadata_unrarefied <- t(metadata_unrarefied)
-write.csv(t(metadata_unrarefied), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied_test.csv")
+write.csv(t(metadata_unrarefied), "path/ITS_metadata_unrarefied_test.csv")
 
 ```
 
@@ -645,7 +645,7 @@ physeq_fungal_only_pres_abs@sam_data
 barplot_ITS_taxa <- plot_grouped_taxa_bar(physeq_fungal_only_pres_abs, merge_var = "topology", level ="Class", higher_level = "Phylum", threshold = 3.5, palette = "Set3")
 barplot_ITS_taxa
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Taxonomy_fig3.png", width = 15, height =10,units = "in", dpi = 600)
+ggsave("path/ITS_Taxonomy_fig3.png", width = 15, height =10,units = "in", dpi = 600)
 
 ```
 
@@ -840,7 +840,7 @@ meta$Streetpair <- substr(meta$SampleID, 0, 3)
 meta$Streetpair <- gsub("o","", meta$Streetpair)
 meta$Streetpair <- substr(meta$Streetpair, 0, 2)
 meta <- t(meta)
-write.csv(t(meta), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied.csv")
+write.csv(t(meta), "path/ITS_metadata_unrarefied.csv")
 
 meta <- as.data.frame(t(meta))
 
@@ -892,7 +892,7 @@ ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
   mytheme
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("path/ITS_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ## Second and Third axis
 ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
@@ -916,7 +916,7 @@ ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
     y=paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep="")) +
   guides(fill=guide_legend(override.aes=list(shape=21)))+
   mytheme
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC2_PC3_test.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("path/ITS_Eucledian_distance_PC2_PC3_test.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ## Third and Fourth axis
 ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
@@ -942,7 +942,7 @@ ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
   mytheme
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC3_PC4_test.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("path/ITS_Eucledian_distance_PC3_PC4_test.png",width = 15, height = 10, units = "in", dpi = 600)
 ```
 
 #### Permanova-clr
@@ -966,7 +966,7 @@ permutest(beta_disp, pairwise = TRUE)
 
 ```{r}
 ## always difficulties with Phyloseq sample info to dataframe, fastest way is to just load the metadata csv. 
-meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied.csv", row.names = 1)
+meta <- read.csv("paht/ITS_metadata_unrarefied.csv", row.names = 1)
 # PERMANOVA for individual variables
 adonis_city <- adonis2(dist_aitch ~ city, data=as.data.frame(meta))
 adonis_city
@@ -1027,7 +1027,7 @@ street_df <- bind_rows(
   data.frame(Test="R2_values", street_pairperm$R2.value)
 )
 
-write.csv(combined_results, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_PCOA_statistical_summary_aitch_test.csv")
+write.csv(combined_results, "path/ITS_PCOA_statistical_summary_aitch_test.csv")
 
 ```
 
@@ -1093,7 +1093,7 @@ ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
   guides(fill=guide_legend(override.aes=list(shape=21)))+
   mytheme
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/Bray_ITS_rarefied_test.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("path/Bray_ITS_rarefied_test.png",width = 15, height = 10, units = "in", dpi = 600)
 
 pcoa_bray_all <- ggplot(df_sum, aes(Axis.1,Axis.2, fill=topology, shape=city)) +
   geom_point(size=5, alpha=0.7)+
@@ -1148,7 +1148,7 @@ pcoa_jaccard_all
 
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/Jaccard_figure_please_delete.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("pahtJaccard_figure_please_delete.png",width = 15, height = 10, units = "in", dpi = 600)
 
 
 
@@ -1252,7 +1252,7 @@ split_colnames <- lapply(new_colnames, str_split_i,pattern= "_", i=1)
 split_colnames <- unlist(split_colnames)
 colnames(ASV_table_16S) <- split_colnames
 
-taxonomy=read.csv("G:/My Drive/CityDeal/16S - Panji/16s_taxonomy.csv", row.names=1, header = T)
+taxonomy=read.csv("path/16s_taxonomy.csv", row.names=1, header = T)
 replace(taxonomy, taxonomy == " ", NA) -> tax1
 taxonomy1=as.matrix(tax1)
 
@@ -1261,7 +1261,7 @@ Metadata_FA_16S <- read.csv("./Input_data/FA_metadata_16S.csv")
 
 
  
-# metadata=read.csv("G:/My Drive/CityDeal/16S - Panji/metadata.csv", row.names=1)
+# metadata=read.csv("metadata.csv", row.names=1)
 # metadata
 #META=sample_data(metadata)
 rownames(Metadata_FA_16S) <- Metadata_FA_16S$SampleID
@@ -1315,8 +1315,8 @@ Oke, there is clearly some major contamination in two plates
 #settings
 theme_set(theme_bw())
 options(stringsAsFactors = FALSE)
-path.in <- "G:/My Drive/CityDeal/Data_analysis_after_review/Input_data" # CHANGE ME
-path.out <- "G:/My Drive/CityDeal/Data_analysis_after_review/Decontam" # CHANGE ME
+path.in <- "" # CHANGE ME
+path.out <- "" # CHANGE ME
 
 #color palettes
 cbbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000")
@@ -1423,7 +1423,7 @@ rm(list=setdiff(ls(), "physeq_bacterial_only"))
 ## 6.1 subsetting phyloseq
 
 ```{r}
-metadata=read.csv("G:/My Drive/CityDeal/Metadata/Metadata_per_sample.csv", row.names=1)
+metadata=read.csv("path/Metadata_per_sample.csv", row.names=1)
 # In my case the metadata has multiple experiments in there. Here you could filter them on column
   metadata <- metadata[metadata$experiment=="CityDeal",]
   metadata <- metadata[!grepl("^Lin", rownames(metadata)),]
@@ -1459,7 +1459,7 @@ sequencing_depth <- as.data.frame(sample_sums(physeq_bacterial_only))
 
 
 
-write.csv(sequencing_depth, "G:/My Drive/CityDeal/Data_analysis_after_review/16Ssequencing_depth_raw.csv")
+write.csv(sequencing_depth, "paht16Ssequencing_depth_raw.csv")
 # rarefy your dataset to lowest sequencing length or a custom number, 711 should be kept constant:
 phy_rare <- subset_samples(physeq_bacterial_only, sample_sums(physeq_bacterial_only)>=40000)
 phy_rare <- rarefy_even_depth(phy_rare,rngseed = 711, replace = F, trimOTUs = TRUE, 	verbose = F)
@@ -1492,7 +1492,7 @@ rarefaction_curve_16S <- rarefaction_curve_16S + mytheme +
     y ="Total ASVs"
     )
 rarefaction_curve_16S
-ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_16S_raw.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("x/Rarefaction_16S_raw.png",width = 15, height = 10, units = "in", dpi = 600)
 
 
 ## ITS rarefaction curve after rarefaction
@@ -1505,7 +1505,7 @@ rarefaction_curve_16S_RF44000 <- rarefaction_curve_16S_RF44000 + mytheme +
     y ="Total ASVs"
     )
 rarefaction_curve_16S_RF44000
-ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_16S_RF42363.png.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("./Rarefaction_16S_RF42363.png.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ```
 
@@ -1523,8 +1523,8 @@ Richnes_parameters_rar <- estimate_richness(phy_rare, measures=c("Observed", "In
 enriched_meta <- merge(as.data.frame(phy_rare@sam_data), Richnes_parameters_rar, by = "row.names", all.x = TRUE)
 # And add groups (city-topology)
 enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
-write.csv(enriched_meta, "G:/My Drive/CityDeal/Data_analysis_after_review/16S_enriched_meta_rarefied.csv")
-#enriched_meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/16S_enriched_meta_rarefied.csv", row.names = 1)
+write.csv(enriched_meta, "./16S_enriched_meta_rarefied.csv")
+#enriched_meta <- read.csv(".16S_enriched_meta_rarefied.csv", row.names = 1)
 
 phy_rare@sam_data <- sample_data(enriched_meta)
 
@@ -1551,7 +1551,7 @@ richness_all_c <- ggplot(data = enriched_meta,
 richness_all_c
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/16S_alpha_Div_figure_2.png", width = 15, height =10,
+ggsave("./16S_alpha_Div_figure_2.png", width = 15, height =10,
 units = "in", dpi = 600)
 
 ## For each city and topology apart
@@ -1615,7 +1615,7 @@ richness_all_c_unrar <- ggplot(data = enriched_meta,
         #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
 richness_all_c_unrar
 
-#ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/16S_Alpha_div_unrar_supp.png", width = 15, height =10,
+#ggsave("./16S_Alpha_div_unrar_supp.png", width = 15, height =10,
 units = "in", dpi = 600)
 
 ## For each city and topology apart
@@ -1663,7 +1663,7 @@ barplot_16S_taxa
 barplot_16S_rare <- plot_rare_phyla_bar(physeq_bacterial_only_pres_abs, merge_var = "topology",  higher_level = "Phylum", threshold = 3.5, palette = "Set3")
 barplot_16S_rare
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Taxonomy_fig3_low_orders.png", width = 15, height =10,units = "in", dpi = 600)
+ggsave("./S16_Taxonomy_fig3_low_orders.png", width = 15, height =10,units = "in", dpi = 600)
 
 ```
 
@@ -1881,7 +1881,7 @@ ggplot(df_16S, aes(PC1, PC2, color = city, shape = topology)) +
  meta$Streetpair <- gsub("o","", meta$Streetpair)
  meta$Streetpair <- substr(meta$Streetpair, 0, 2)
 # meta <- t(meta)
-#  write.csv(t(meta), "G:/My Drive/CityDeal/Data_analysis_after_review/S16_metadata_unrarefied.csv")
+#  write.csv(t(meta), "./S16_metadata_unrarefied.csv")
 meta <- as.data.frame(meta)
 
 # Extract sample scores
@@ -1930,7 +1930,7 @@ ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
   mytheme
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave(".S16_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ## Second and Third axis
 ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
@@ -1955,7 +1955,7 @@ ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
     y=paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep="")) +
   guides(fill=guide_legend(override.aes=list(shape=21)))+
   mytheme
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC2_PC3.png",width = 15, height = 10, units = "in", dpi = 600)
+ggsave("./16_Eucledian_distance_PC2_PC3.png",width = 15, height = 10, units = "in", dpi = 600)
 
 ## Third and Fourth axis
 ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
@@ -1981,7 +1981,7 @@ ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
   mytheme
 
 
-ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC3_PC4.png",width = 15, height = 10, units= "in", dpi = 600)
+ggsave("./S16_Eucledian_distance_PC3_PC4.png",width = 15, height = 10, units= "in", dpi = 600)
 ```
 
 ```{r}
@@ -2001,7 +2001,7 @@ Statistics by clr
 
 ```{r}
 # always difficulties with Phyloseq sample info to dataframe, fastest way is to just load the metadata csv. 
-#meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/S16_metadata_unrarefied.csv", row.names = 1)
+#meta <- read.csv("./S16_metadata_unrarefied.csv", row.names = 1)
 # PERMANOVA for individual variables
 adonis_city <- adonis2(dist_aitch ~ city, data=as.data.frame(meta))
 adonis_city
@@ -2062,7 +2062,7 @@ street_df <- bind_rows(
   data.frame(Test="R2_values", street_pairperm$R2.value)
 )
 
-write.csv(combined_results, "G:/My Drive/CityDeal/Data_analysis_after_review/S16_PCOA_statistical_summary_aitch.csv")
+write.csv(combined_results, "./S16_PCOA_statistical_summary_aitch.csv")
 ```
 
 ```{r}
@@ -2641,3 +2641,4 @@ tmp$plot_spe_func_perc(add_facet = TRUE,
 
 ggsave("ASV_ITS_Functopology_viridis_significant_only_test.png", device = png, width = 15, height = 26, units = "in", dpi = 144, limitsize = FALSE)
 ```
+
