@@ -1,0 +1,794 @@
+---
+title: "Multicolinearity detection"
+output: html_document
+date: "2024-11-08"
+editor_options: "Sjoerd"
+  chunk_output_type: inline
+---
+
+```{r}
+mytheme <- theme_bw()+
+  theme(text = element_text(size=15),
+        strip.background = element_blank(),
+        strip.placement = "outside",
+        legend.box.background = element_rect(),
+        legend.box.margin = margin(1, 1, 1, 1),
+        legend.title = element_text(face = "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank()) 
+```
+
+## Basic statistics
+
+```{r}
+# Load tidyverse for data manipulation
+library(tidyverse)
+library(broom)
+library(openxlsx)
+# --- 1. Read and clean the data ---
+
+# Read CSV
+Soil_parameters <- read.csv("G:/My Drive/CityDeal/Eurofins_results/Soil_analysis_for_statistics.csv", row.names = 1, sep = ";", dec = ".", na.strings = c("", " ", "<", "<0.5", "<1", "<1.1", "<0.1", "<200", "<150"))
+
+# Ensure Group is treated as a factor
+Soil_parameters$Group <- as.factor(Soil_parameters$Group)
+
+# Replace "<" patterns by NA and convert numeric columns properly
+soil_par_clean <- Soil_parameters %>%
+  mutate(across(where(is.character), ~ gsub("<.*", NA, .))) %>%   # remove '<' values
+  mutate(across(where(is.character), ~ as.numeric(.)))             # convert to numeric when possible
+
+# --- 2. Compute group means for all numeric columns ---
+
+group_means <- soil_par_clean %>%
+  group_by(Group) %>%
+  summarise(across(where(is.numeric), ~ mean(.x, na.rm = TRUE)))
+
+print(group_means)
+
+# --- 3. Run ANOVA for each numeric variable ---
+
+anova_results <- soil_par_clean %>%
+  select(Group, where(is.numeric)) %>%
+  pivot_longer(-Group, names_to = "Variable", values_to = "Value") %>%
+  group_by(Variable) %>%
+  summarise(
+    p_value = tryCatch({
+      summary(aov(Value ~ Group))[[1]][["Pr(>F)"]][1]
+    }, error = function(e) NA)
+  )
+
+print(anova_results)
+
+# --- 4. Combine means + ANOVA p-values into one summary table ---
+
+summary_table <- group_means %>%
+  pivot_longer(-Group, names_to = "Variable", values_to = "Mean") %>%
+  pivot_wider(names_from = Group, values_from = Mean) %>%
+  left_join(anova_results, by = "Variable") %>%
+  mutate(Significance = case_when(
+    p_value < 0.001 ~ "***",
+    p_value < 0.01  ~ "**",
+    p_value < 0.05  ~ "*",
+    TRUE ~ ""
+  )) %>%
+  arrange(p_value)
+
+# View
+print(summary_table)
+
+
+
+# --- 5. Tukey HSD post-hoc tests (for significant ANOVAs) ---
+tukey_results <- list()
+sig_vars <- anova_results %>% filter(p_value < 0.05) %>% pull(Variable)
+
+for (var in sig_vars) {
+  model <- aov(reformulate("Group", var), data = soil_par_clean)
+  tukey_results[[var]] <- TukeyHSD(model)
+}
+
+# Convert list of TukeyHSD outputs into a single data frame
+tukey_table <- map_dfr(names(tukey_results), function(var) {
+  # Extract the subtable (often named "Group")
+  tk <- tukey_results[[var]][[1]]  # take first element (the actual comparison table)
+  
+  # Convert to tibble
+  tk_df <- as.data.frame(tk) %>%
+    rownames_to_column("contrast") %>%
+    mutate(Variable = var) %>%
+    rename(
+      diff = diff,
+      lwr = lwr,
+      upr = upr,
+      p_adj = `p adj`
+    ) %>%
+    select(Variable, contrast, diff, lwr, upr, p_adj)
+  
+  return(tk_df)
+})
+
+#Or combine both into one workbook with two sheets:
+wb <- createWorkbook()
+addWorksheet(wb, "Group Means & ANOVA")
+addWorksheet(wb, "Tukey Posthoc")
+writeData(wb, "Group Means & ANOVA", summary_table)
+writeData(wb, "Tukey Posthoc", tukey_table)
+saveWorkbook(wb, "G:/My Drive/CityDeal/Eurofins_results/Soil_full_statistical_summary.xlsx", overwrite = TRUE)
+
+
+# write.csv(summary_table, "G:/My Drive/CityDeal/Eurofins_results/SUMMARY_STATS_SOIL")
+```
+
+```{r}
+tukey_results <- map_dfr(
+  anova_results %>% filter(p_value < 0.05) %>% pull(Variable),
+  function(var) {
+    model <- aov(reformulate("Group", var), data = data_clean)
+    tk <- TukeyHSD(model)
+    tidy(tk) %>%
+      mutate(Variable = var) %>%
+      select(Variable, contrast = term, group_comparison = contrast, 
+             diff, lwr, upr, adj.p.value = adj.p.value)
+  },
+  .id = "id"
+)
+```
+
+# Inclusion of soil parameters
+
+Input files:
+
+-   ASV table(s)
+
+-   Metadata (soil parameters)
+
+-   Alpha diversity data (in metadata file)
+
+Needed packages:
+
+```{r}
+library(corrplot)
+library(dplyr)
+library(olsrr)
+library(tidyverse)
+library(sjPlot)
+library(lme4)
+library(car)
+library(vegan)
+library(adespatial)
+library(ggplot2)
+library(gtools)
+library (ggrepel)
+```
+
+## Multi-colinearity detection
+
+First we're going to check for (multi)-colinearity of the soil factores
+
+### Build GLM Correlation Model
+
+```{r}
+
+#https://www.youtube.com/watch?v=1K3SKsEj9eI (Basic statistics)
+#https://www.youtube.com/watch?v=WnmwuD8OwMw (GLM in R)
+#https://www.youtube.com/watch?v=DDP62EUMRFs (GLM family) 
+## Necessary libraries
+
+```
+
+First we need to build the correlation model. The file beneath is a file of each soil sample with for each parameter the z-score. The z-score was calculated previously in Excel with the following formula: (Average_values_parameter - Sample_value)/Standard_deviation_parameter.
+
+rownames(my_data_corr) \<- make.unique(as.character(my_data_corr[, 1])) \# Ensure unique row names
+
+```{r}
+my_data_corr=read.csv("G:/My Drive/CityDeal/Eurofins_results/Eurofins_soil_analysis_z-score.csv", header = T, row.names = 1)
+#rownames(my_data_corr) <- make.unique(as.character(my_data_corr[, 1]))  # Ensure unique row names
+#my_data_corr <- my_data_corr[, -1]  # Remove the first column if it's no longer needed as data
+```
+
+### 1. CORRELATION
+
+Correlations close to-1 or +1 might indicate the existence of multicollinearity.
+
+As a rule of thumb, one might suspect multicollinearity when the correlation between two (predictor) variables is below -0.9 or above +0.9, though in FIMCB <!--# Ask Panji for a reference to this paper  --> paper, the cut off value is set to -0.7 or +0.7
+
+```{r}
+#Subsetting my data, to make only use the important parameters
+my_data_corr_subset <- my_data_corr[, 8:ncol(my_data_corr)]
+
+# Ensure all selected columns are numeric (optional, but good practice)
+my_data_corr_subset <- my_data_corr_subset[sapply(my_data_corr_subset, is.numeric)]
+
+cor_df <- as.data.frame(cor(my_data_corr_subset, method = 'pearson'))
+
+corrplot(cor(my_data_corr_subset), method = "number")
+```
+
+#### Check Collinearity ----
+
+All environmental variables were first tested for possible collinearity based on Pearson correlation values. When the correlation between two variables was higher than 0.7 (or lower than -0.7), only one of the variables was included in the downstream analyses.
+
+```{r}
+# select metadata column, containing numbers only
+
+cor_result <- cor(as.matrix(my_data_corr_subset), method = 'pearson')
+xy <- t(combn(colnames(cor_result), 2))
+cor_paired_df <- data.frame(xy, dist=cor_result[xy])
+# Get pairs with a cor value > 0.7
+pair_to_revise <- cor_paired_df %>% filter(abs(dist) > 0.5)
+
+pair_to_revise
+
+## I saved the table to export from it
+write.csv(pair_to_revise, "pairs_to_revise_soildata.csv")
+
+## Now remove data that is colinear iteratively
+my_data_corr_subset$CEC = NULL
+
+cor_result <- cor(as.matrix(my_data_corr_subset), method = 'pearson')
+xy <- t(combn(colnames(cor_result), 2))
+cor_paired_df <- data.frame(xy, dist=cor_result[xy])
+
+```
+
+After above test I manually removed certain parameters that correlate strongly with others. I this case I chose to remove phCaCl2, Dichtheid, SLV, C/S, Cavrd, Cavoorr, CECbez, C/OS, stuif, zand. I did this manually in Excel, because I wanted to check the data anyways
+
+### 2. TOLERANCE & VARIANCE INFLATION FACTOR (VIF)
+
+As a rule of thumb, a VIF exceeding 5 requires further investigation, whereas VIFs above 10 indicate multicollinearity. Ideally, the Variance Inflation Factors are below 3.
+
+Preperation of data. I am planning to use the R-package car for this analysis. I subselected data from the earlier exercise.
+
+```{r}
+# This can be skipped, based on if there was colinearity in the previous step and how you solved it
+my_data_after_revision <- read.csv2("~/Citydeal/Metadata/Soil_parameters_after_filter_and_alphadiv.csv", header = T, sep=",")
+rownames(my_data_after_revision) <- make.unique(as.character(my_data_after_revision[, 1]))
+my_data_after_revision <- my_data_after_revision[, -1]  # Remove the first column 
+# Ensure all selected columns are numeric (optional, but good practice)
+my_data_after_revision <- as.data.frame(lapply(my_data_after_revision, type.convert, as.is = TRUE))
+my_data_after_revision[,"type"] <- as.factor(my_data_after_revision[,"type"])
+
+
+```
+
+We will test if the values are multi-colinear with different alpha diversity indexes (richness, shannon, chao), based on linear models. For this I made a document in Excel with all the Z-scores. Alpha diversity measures where found in the .rmd file for Alpha diversity.
+
+```{r}
+library(webshot)
+
+#First we need a (generalized) linear model
+my_data_after_revision <- read.csv("G:/My Drive/CityDeal/Metadata/soil_metadata_zscore_after_filtering_pooled.csv", row.names = 1, sep=",")
+
+## For ITS
+#shannon
+Model_shannonITS<- glm(data_shannon.ITS ~ data_shannon.16S + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Richness
+Model_RichnessITS<- glm(Fungal.Richness ~ Bacterial.Richness + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Chao, because why not?
+Model_chaoITS<- glm(S.chao1.ITS ~ S.chao1.16S + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+
+
+##For 16s
+#shannon
+Model_shannon16s<- glm(Shannon16S ~ ShannonITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Richness
+Model_Richness16s<- glm(Bacterial.Richness ~ Fungal.Richness + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Chao, because why not?
+Model_chao16s<- glm(Chao1.16s ~ Chao1ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+
+## A nice table visualisation (sjPlot package)
+tab_model(Model_RichnessITS, file ="G:/My Drive/CityDeal/Data_analysis_after_review/ITS_richenss_tab_model.html")
+tab_model(Model_Richness16s, file= "G:/My Drive/CityDeal/Data_analysis_after_review/S16_richenss_tab_model.html")
+
+webshot("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_richenss_tab_model.html", "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_tab_model_richness.png")
+webshot("G:/My Drive/CityDeal/Data_analysis_after_review/S16_richenss_tab_model.html", "G:/My Drive/CityDeal/Data_analysis_after_review/S16_tab_model_richness.png")
+## Non have a significant effect on Richnes (!!!!!)
+```
+
+TREES ONLY
+
+```{r}
+library(webshot)
+
+#First we need a (generalized) linear model
+my_data_after_revision <- read.csv("G:/My Drive/CityDeal/Metadata/Soil_metadata_easy_zscore_TREES.csv", row.names = 1, sep="\t")
+
+## For ITS
+## For ITS
+#shannon
+Model_shannonITS<- glm(data_shannon.ITS ~ data_shannon.16S + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Richness
+Model_RichnessITS<- glm(RichnessITS ~ Richness.16S + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Chao, because why not?
+Model_chaoITS<- glm(S.chao1.ITS ~ S.chao1.16S + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+
+
+##For 16s
+#shannon
+Model_shannon16s<- glm(data_shannon.16S ~ data_shannon.ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Richness
+Model_Richness16s<- glm(Richness.16S ~ Richness.ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+#Chao, because why not?
+Model_chao16s<- glm(Chao1.16s ~ Chao1.ITS + CN + N.Levering + P.totaal + Saanv + pH+ CEC + verkr.bh + verslemp + Ca.bez + Silt, data = my_data_after_revision)
+
+## A nice table visualisation (sjPlot package)
+tab_model(Model_RichnessITS)#, file ="G:/My Drive/CityDeal/ITS-Sjoerd/ITS-11912/eurofins_soil/tab_model_TREES.html")
+
+tab_model(Model_Richness16s, file= "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model_TREES.html")
+
+webshot("G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/ITS-Sjoerd/eurofins_soil/tab_model_TREES.png")
+webshot("G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model.html", "G:/My Drive/CityDeal/16S-Sjoerd/eurofins_soil/tab_model_TREES.png")
+```
+
+Still i am going to test for multi-colinearity, although I don't think it matters much now. As a rule of thumb, a VIF exceeding 5 requires further investigation, whereas VIFs above 10 indicate multicollinearity. Ideally, the Variance Inflation Factors are below 3.
+
+```{r}
+
+## Calculate VIF score 
+vif_resultsITS <- ols_vif_tol(Model_shannonITS)
+vif_results16s <- ols_vif_tol(Model_shannon16s)
+
+vif_resultsITS
+vif_results16s
+```
+
+## Hellinger transformation
+
+We need to transform the ASV table(s) to normalize them or something (check). Here we run into a little problem that is caused by the pooling of three samples for each dataset. To solve this we can do several things.
+
+1.  We need our ASV tables
+
+    ```{r}
+    #For ITS:
+    ITS_ASV_table <- as.data.frame(physeq_fungal_only_sub@otu_table)
+    ITS_ASV_table <- read.csv("G:/My Drive/CityDeal/ITS-Sjoerd/ITS-11912/ASV_ITS_rarefied11912.csv", header = T, row.names = 1)
+
+    #For 16s:
+    ASV_table_16s <- as.data.frame(physeq_bacterial_only@otu_table)
+    #ASV_table_16s <- read.csv("G:/My Drive/CityDeal/16S - Panji/Sjoerd R - 40,000 reads/phyraresuball_asv_samplenames.csv", header = T, row.names = 1)
+
+    ```
+
+2.  We want to pool the samples microbiome data the same way as we did with the edaphic factors
+
+    ```{r}
+    #Bacterial
+    sample_to_pool <- read.csv("G:/My Drive/CityDeal/Metadata/Sample_to_pool_soildata.csv")
+    ASV_meta <- as.matrix(physeq_bacterial_only@sam_data)
+    ASV_meta <- as.data.frame(ASV_meta)
+    ASV_meta$Row.names <- rownames(ASV_meta)
+    new_ASV_meta <- as.data.frame(inner_join(ASV_meta, sample_to_pool, by = "Row.names"))
+    rownames(new_ASV_meta) <- new_ASV_meta$Row.names
+
+
+    new_ASV_meta <- sample_data(new_ASV_meta)
+    physeq_bacterial_edaphic <- physeq_bacterial_only
+    physeq_bacterial_edaphic@sam_data <- new_ASV_meta
+    physeq_bacterial_edaphic@sam_data
+
+    physeq_bacterial_edaphic <- subset_samples(physeq_bacterial_edaphic, experiment == "CityDeal")
+    physeq_bacterial_edaphic@sam_data$poo
+    physeq_bacterial_edaphic <- merge_samples(physeq_bacterial_edaphic, "Pool")
+    physeq_bacterial_edaphic <- prune_taxa(taxa_sums(physeq_bacterial_edaphic) > 0, physeq_bacterial_edaphic)
+    physeq_bacterial_edaphic
+    ```
+
+    ```{r}
+    # This file does that:
+    sample_to_pool <- read.csv("G:/My Drive/CityDeal/Metadata/Sample_to_pool_soildata.csv")
+    ASV_meta <- as.data.frame(physeq_fungal_only_sub@sam_data)
+    # # Super anoying way to deal with phyloseq extracted object
+    # ASV_meta <- t(ASV_meta)
+    # write.csv(t(ASV_meta), "G:/My Drive/CityDeal/Metadata/ASV_meta_temp.csv")
+    # ASV_meta <- read.csv("G:/My Drive/CityDeal/Metadata/ASV_meta_temp.csv", row.names = 1)
+    new_ASV_meta <- as.data.frame(inner_join(ASV_meta, sample_to_pool, by = "Row.names"))
+    rownames(new_ASV_meta) <- new_ASV_meta$Row.names
+    new_ASV_meta <- sample_data(new_ASV_meta)
+    physeq_fungal_edaphic <- physeq_fungal_only_sub
+    physeq_fungal_edaphic@sam_data <- new_ASV_meta
+    physeq_fungal_edaphic@sam_data
+
+    physeq_fungal_edaphic <- subset_samples(physeq_fungal_edaphic, experiment == "CityDeal")
+    physeq_fungal_edaphic@sam_data$poo
+    physeq_fungal_edaphic <- merge_samples(physeq_fungal_edaphic, "Pool")
+    physeq_fungal_edaphic <- prune_taxa(taxa_sums(physeq_fungal_edaphic) > 0, physeq_fungal_edaphic)
+    physeq_fungal_edaphic
+    ```
+
+```{r}
+
+ASV_table_ITS <- as.data.frame(otu_table(physeq_fungal_edaphic))
+ASV_table_16s <- as.data.frame(otu_table(physeq_bacterial_edaphic))
+
+asv.16s.hell <- decostand(ASV_table_16s, 'hell')
+asv.ITS.hell <- decostand(ASV_table_ITS, 'hell')
+
+
+#rm(ASV_table_ITS)
+#rm(filtered_ASV_ITS)
+```
+
+```{r}
+#Cleanup
+rm(list=setdiff(ls(), c("asv.ITS.hell","my_data_after_revision","mytheme", "new_ASV_meta")))
+
+```
+
+## Forward selection
+
+I ran into the problem that my variables do not all have a significant effect on the community structure. So before running the forward selection, I am going to try to evaluate each specific variable.
+
+```{r}
+CN_mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$CN))
+N.lev.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$N.Levering))
+P.totaal.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$P.totaal))
+Saanv.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$Saanv))
+ph.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$pH))
+CEC.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$CEC))
+verkr.bh.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$verkr.bh))
+verslemp.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$verslemp))
+Ca.bez.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$Ca.bez))
+silt.mantel.ITS <- mantel(vegdist(asv.ITS.hell), dist(my_data_after_revision$Silt))
+```
+
+```{r}
+CN_mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$CN))
+N.lev.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$N.Levering))
+P.totaal.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$P.totaal))
+Saanv.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$Saanv))
+ph.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$pH))
+CEC.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$CEC))
+verkr.bh.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$verkr.bh))
+verslemp.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$verslemp))
+Ca.bez.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$Ca.bez))
+silt.mantel.16s <- mantel(vegdist(asv.16s.hell), dist(my_data_after_revision$Silt))
+```
+
+A check for ITS
+
+```{r}
+CN_mantel.ITS
+N.lev.mantel.ITS
+P.totaal.mantel.ITS
+Saanv.mantel.ITS
+ph.mantel.ITS
+CEC.mantel.ITS
+verkr.bh.mantel.ITS
+verslemp.mantel.ITS
+Ca.bez.mantel.ITS
+silt.mantel.ITS
+```
+
+And a check for 16s
+
+```{r}
+CN_mantel.16s
+N.lev.mantel.16s
+P.totaal.mantel.16s
+Saanv.mantel.16s
+ph.mantel.16s
+CEC.mantel.16s
+verkr.bh.mantel.16s
+verslemp.mantel.16s
+Ca.bez.mantel.16s
+silt.mantel.16s
+```
+
+Now it's time for forward selection. We do this to know which variables we should keep for the RDA analysis.
+
+```{r}
+anyNA(asv.ITS.hell)
+fungal_metadata <- read.csv("G:/My Drive/CityDeal/Metadata/soil_metadata_zscore_after_filtering_pooled-nona.csv", row.names = 1)
+
+sel.fs <- forward.sel(asv.ITS.hell, fungal_metadata, nperm = 999)
+
+pval.adj <- p.adjust(sel.fs$pval, method = 'holm', n = ncol(fungal_metadata))
+sel.fs$pval.adj <- pval.adj
+sel.fs$pval.adj.stars <- gtools::stars.pval (pval.adj)
+sel.fs
+sel.fs.ITS <- sel.fs
+
+```
+
+And for 16S
+
+```{r}
+anyNA(asv.16s.hell)
+bacterial_metadata <- read.csv("G:/My Drive/CityDeal/Metadata/soil_metadata_zscore_after_filtering_pooled-nona.csv", row.names = 1)
+
+sel.fs <- forward.sel(asv.16s.hell, bacterial_metadata, nperm = 999)
+
+pval.adj <- p.adjust(sel.fs$pval, method = 'holm', n = ncol(bacterial_metadata))
+sel.fs$pval.adj <- pval.adj
+sel.fs$pval.adj.stars <- gtools::stars.pval (pval.adj)
+sel.fs
+sel.fs.16S <- sel.fs
+
+```
+
+### The RDA analysis for 16S.
+
+```{r}
+# RDA analysis ------------------------------------------------------------
+
+#If I want to make a subselection
+#metadata_select_16s <- metadata_filt_16s %>% select(Silt)
+
+tb_rda.all <- rda(formula = asv.16s.hell ~ CN + N.Levering + P.totaal + pH + CEC + verslemp + Ca.bez + Silt, data = bacterial_metadata)
+
+stats.tb.rda.all.16S <- anova(tb_rda.all)  # 0.001 *** - it is significant
+
+stats.tb.rda.all.16S
+```
+
+```         
+Permutation test for rda under reduced model Permutation: free Number of permutations: 999  Model: rda(formula = asv.16s.hell ~ CN + N.Levering + P.totaal + pH + CEC + verslemp + Ca.bez + Silt, data = metadata_filt_16s)           Df Variance      F Pr(>F)     Model      8  0.04820 2.5429  0.001 *** Residual 288  0.68235                   --- Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+##Permutation test for rda under reduced model Permutation: free Number of permutations: 999
+
+Model: rda(formula = asv.16s.hell \~ CN + N.Levering + P.totaal + Saanv + pH + CEC + verkr.bh + verslemp + Ca.bez + Silt, data = metadata_filt_16s) Df Variance F Pr(\>F)\
+Model 10 0.05347 2.2584 0.001 ***Residual 286 0.67708\
+--- Signif. codes: 0 ‘***’ 0.001 ‘\*\*’ 0.01 ‘\*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+
+```{r}
+# tb_rda.all.ITS <- rda(formula = asv.ITS.hell ~ Silt + Saanv, data = metadata_filt_ITS)
+# 
+# anova(tb_rda.all.ITS)  # 0.001 *** - it is significant
+
+tb_rda.all.ITS <- rda(formula = asv.ITS.hell ~ Silt + N.Levering, data = fungal_metadata)
+anova(tb_rda.all.ITS)  # 0.001 *** - it is significant
+```
+
+```         
+Permutation test for rda under reduced model Permutation: free Number of permutations: 999  Model: rda(formula = asv.ITS.hell ~ Silt + Saanv, data = metadata_filt_ITS)           Df Variance      F Pr(>F)     Model      2  0.01083 1.6206  0.001 *** Residual 274  0.91544                   --- Signif. codes:  0 ‘***’ 0.001 ‘**’ 0.01 ‘*’ 0.05 ‘.’ 0.1 ‘ ’ 1
+```
+
+```{r}
+adjR2.tbrda.16s <- RsquareAdj(tb_rda.all)$adj.r.squared
+adjR2.tbrda.16s
+rda_plot <- plot(tb_rda.all, scaling=1)
+
+```
+
+```{r}
+adjR2.tbrda.ITS <- RsquareAdj(tb_rda.all.ITS)$adj.r.squared
+adjR2.tbrda.ITS
+```
+
+```{r}
+rda_plot <- plot(tb_rda.all.ITS, scaling=1)
+rda_plot
+```
+
+## Plot RDA with ggplot2
+
+### Normal RDA plot
+
+Let's try something. This is fun, but I should add color based on typology
+
+### RDA - biplot16S
+
+```{r}
+R.sum <- summary(tb_rda.all)
+tb_rda.all$CA$eig
+R.sum   # Prints the "Importance of components" table
+R.sum$cont$importance[2, "RDA1"]
+# 0.74785
+R.sum$cont$importance[2, "RDA2"]
+# [1] 0.19804
+```
+
+with help from chatGPT
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+plot2 <- ordiplot(tb_rda.all, choices=c(1,2))
+sites.long2 <- BiodiversityR::sites.long(plot2, env.data=asv.16s.hell) #to map the position of each sample on RDA plot
+species.long2 <- BiodiversityR::species.long(tb_rda.all) #to map the position of each ASV on RDA plot
+axis.long2 <- BiodiversityR::axis.long(plot2, choices=c(1, 2)) #to quantify axis on RDA plot
+
+sites.long2$axis1 = as.numeric(sites.long2$axis1) #change the parameter to numeric
+sites.long2$axis2 = as.numeric(sites.long2$axis2) #change the parameter to numericm
+# metadata_per_sample <- t(as.data.frame(physeq_fungal_edaphic@sam_data))
+# write.csv(t(metadata_per_sample),"./Input_data/metadata_per_pool.csv")
+metadata_per_sample <- read.csv("./Input_data/metadata_per_pool.csv", row.names = 1)
+
+metadata_per_sample$sample <- rownames(metadata_per_sample)
+sites.long2$sample<-rownames(sites.long2)
+sites_annotated <- merge(sites.long2, metadata_per_sample, by = "sample")
+
+sites.long2 <- sites_annotated
+
+# Run envfit on your RDA object and metadata
+spec.envfit <- envfit(tb_rda.all, env = bacterial_metadata)
+
+# Convert the arrow output to a data frame for ggplot
+selected_vars <- rownames(tb_rda.all$CCA$biplot)
+arrow_df <- as.data.frame(spec.envfit$vectors$arrows) %>%
+  tibble::rownames_to_column("labels") %>%
+  mutate(
+    r = spec.envfit$vectors$r,
+    p = spec.envfit$vectors$pvals
+  )
+arrow_df <- arrow_df %>%
+  filter(labels %in% selected_vars)
+
+# Extract eigenvalues and percentage variance explained
+eig_vals <- tb_rda.all$CCA$eig  
+axis_perc <- eig_vals / sum(eig_vals) * 100
+
+# Extract eigenvalues and percentage variance explained
+eig_vals <- tb_rda.all$CCA$eig  
+axis_perc <- eig_vals / sum(eig_vals) * 100
+
+# Labels for axes
+xlab_text <- paste0("RDA1 (", round(axis_perc[1], 1), "%)")
+ylab_text <- paste0("RDA2 (", round(axis_perc[2], 1), "%)")
+
+# Base RDA plot with metadata aesthetics
+rda_plot <- ggplot() + 
+  geom_vline(xintercept = 0, color = "black", linetype = 2) +
+  geom_hline(yintercept = 0, color = "black", linetype = 2) +  
+  xlab(xlab_text) +
+  ylab(ylab_text) +
+  scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+  scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+
+  # 🎨 Sample points
+  geom_point(data = sites_annotated, 
+             aes(x = axis1, y = axis2, fill = topology, shape = city), 
+             size = 6, stroke = 1.5) +
+
+  # # 🔴 Species scores (smaller red dots)
+  # geom_text(data = species.long2, 
+  #           aes(x = axis1, y = axis2, label = labels), 
+  #           color = "red", size = 3) +
+
+  # 🌿 Environmental arrows from envfit
+  geom_segment(data = arrow_df, 
+               aes(x = 0, y = 0, xend = RDA1, yend = RDA2), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "blue", size = 0.7) +
+
+  # 🏷 Environmental labels
+  geom_text_repel(data = arrow_df, 
+                  aes(x = RDA1, y = RDA2, label = labels), 
+                  color = "blue", size = 4) +
+
+  # Optional color palette for typology
+  scale_fill_manual(values = c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+   scale_shape_manual(values=c(21,22,23,24,25)) +
+
+  # Style
+  mytheme
+rda_plot
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/RDA_16S.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+```
+
+And for ITS
+
+```{r}
+R.sum <- summary(tb_rda.all.ITS)
+tb_rda.all.ITS$CA$eig
+R.sum   # Prints the "Importance of components" table
+R.sum$cont$importance[2, "RDA1"]
+# 0.74785
+R.sum$cont$importance[2, "RDA2"]
+# [1] 0.19804
+```
+
+```{r}
+plot2 <- ordiplot(tb_rda.all.ITS, choices=c(1,2))
+sites.long2 <- BiodiversityR::sites.long(plot2, env.data=asv.ITS.hell) #to map the position of each sample on RDA plot
+species.long2 <- BiodiversityR::species.long(tb_rda.all.ITS) #to map the position of each ASV on RDA plot
+axis.long2 <- BiodiversityR::axis.long(plot2, choices=c(1, 2)) #to quantify axis on RDA plot
+
+sites.long2$axis1 = as.numeric(sites.long2$axis1) #change the parameter to numeric
+sites.long2$axis2 = as.numeric(sites.long2$axis2) #change the parameter to numericm
+# metadata_per_sample <- t(as.data.frame(physeq_fungal_edaphic@sam_data))
+# write.csv(t(metadata_per_sample),"./Input_data/metadata_per_pool.csv")
+metadata_per_sample <- read.csv("./Input_data/metadata_per_pool.csv", row.names = 1)
+
+metadata_per_sample$sample <- rownames(metadata_per_sample)
+sites.long2$sample<-rownames(sites.long2)
+sites_annotated <- merge(sites.long2, metadata_per_sample, by = "sample")
+
+sites.long2 <- sites_annotated
+
+# Run envfit on your RDA object and metadata
+spec.envfit <- envfit(tb_rda.all.ITS, env = fungal_metadata)
+
+# Convert the arrow output to a data frame for ggplot
+selected_vars <- rownames(tb_rda.all.ITS$CCA$biplot)
+arrow_df <- as.data.frame(spec.envfit$vectors$arrows) %>%
+  tibble::rownames_to_column("labels") %>%
+  mutate(
+    r = spec.envfit$vectors$r,
+    p = spec.envfit$vectors$pvals
+  )
+arrow_df <- arrow_df %>%
+  filter(labels %in% selected_vars)
+
+# Extract eigenvalues and percentage variance explained
+eig_vals <- tb_rda.all.ITS$CCA$eig  
+axis_perc <- eig_vals / sum(eig_vals) * 100
+
+# Labels for axes
+xlab_text <- paste0("RDA1 (", round(axis_perc[1], 1), "%)")
+ylab_text <- paste0("RDA2(", round(axis_perc[2], 2), "%)" )#(", round(axis_perc[2], 1), "%)")
+
+# Base RDA plot with metadata aesthetics
+rda_plot <- ggplot() + 
+  geom_vline(xintercept = 0, color = "black", linetype = 2) +
+  geom_hline(yintercept = 0, color = "black", linetype = 2) +  
+  xlab(xlab_text) +
+  ylab(ylab_text) +
+  scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+  scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
+
+  # 🎨 Sample points
+  geom_point(data = sites_annotated, 
+             aes(x = axis1, y = axis2, fill = topology, shape = city), 
+             size = 6, stroke =1.5) +
+
+  # # 🔴 Species scores (smaller red dots)
+  # geom_text(data = species.long2, 
+  #           aes(x = axis1, y = axis2, label = labels), 
+  #           color = "red", size = 3) +
+
+  # 🌿 Environmental arrows from envfit
+  geom_segment(data = arrow_df, 
+               aes(x = 0, y = 0, xend = RDA1, yend = RDA2), 
+               arrow = arrow(length = unit(0.2, "cm")), 
+               color = "blue", size = 0.7) +
+
+  # 🏷 Environmental labels
+  geom_text_repel(data = arrow_df, 
+                  aes(x = RDA1, y = RDA2, label = labels), 
+                  color = "blue", size = 4) +
+
+  # Optional color palette for typology
+  scale_fill_manual(values = c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+   scale_shape_manual(values=c(21,22,23,24,25)) +
+
+  # Style
+  mytheme
+
+rda_plot
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/RDA_environement_ITS.png",width = 15, height = 10, units = "in", dpi = 600)
+
+```
+
+other plots
+
+```{r}
+# Base plot for R² and Adjusted R² over steps
+ggplot(sel.fs, aes(x = factor(order), group = 1)) +
+  geom_line(aes(y = R2Cum, color = "R² Cumulative"), size = 1.2) +
+  geom_line(aes(y = AdjR2Cum, color = "Adjusted R² Cumulative"), size = 1.2, linetype = "dashed") +
+  geom_point(aes(y = R2Cum), size = 3, shape = 21, fill = "blue") +
+  geom_point(aes(y = AdjR2Cum), size = 3, shape = 21, fill = "red") +
+  scale_color_manual(values = c("R² Cumulative" = "blue", "Adjusted R² Cumulative" = "red")) +
+  labs(x = "Variable Addition Order",
+       y = "Cumulative R² / Adjusted R²",
+       color = "Legend",
+       title = "Model Improvement Over Forward Selection Steps")
+  
+```
+
+```{r}
+# Bar plot of R² contributions
+ggplot(sel.fs, aes(x = reorder(variables, -R2), y = R2)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(x = "Variable", y = "Incremental R²",
+       title = "Incremental Contribution of Each Variable (ΔR²)") +
+  theme_minimal() +
+  coord_flip()
+```

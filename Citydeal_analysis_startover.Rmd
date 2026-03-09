@@ -1,0 +1,2643 @@
+---
+title: "Untitled"
+output: html_document
+date: "2026-01-21"
+---
+
+```{r setup, set.seed(711), include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preliminaries
+
+## Libraries
+
+```{r}
+library(devtools)
+
+## 1. Making phyloseq
+library(dplyr)
+library(tidyverse)
+library("phyloseq")
+library("microbiome")
+#devtools::install_github("benjjneb/decontam")
+library("decontam")
+library(ggplot2)
+library(stringr)
+
+
+## 2
+library("phyloseq.extended")
+
+## 3
+library(doBy)
+library(vegan)
+library(microbiome)
+library(RVAideMemoire)
+library(FSA)
+
+#3.1
+library(RColorBrewer)
+library(scales)
+library(colorspace)
+library(ANCOMBC)
+library(microbiomeMarker)
+library(DESeq2)
+
+#15
+library(viridis)
+library(scales)
+```
+
+## Theme for graphs
+
+```{r}
+mytheme <- theme_bw()+
+  theme(text = element_text(size=15),
+        strip.background = element_blank(),
+        strip.placement = "outside",
+        legend.box.background = element_rect(),
+        legend.box.margin = margin(1, 1, 1, 1),
+        legend.title = element_text(face = "bold"),
+        panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank())
+```
+
+## Functions
+
+```{r}
+# Input: 
+#data = df, where variable1,variable2 and value need to be columnames. 
+#variable1: What do you wanna look at, e.g. typology. 
+#variable2: The thing you want to compare. so if var1 is typology, you can compare them by var2 (e.g. city)
+#Value: Richness/shannon/etc.
+
+
+compare_variables_function <- function(data, variable1, variable2, value) {
+  statement_return <- list()
+  # Loop through each level of the first grouping variable
+  for (subgroup in unique(data[[variable1]])) {
+    
+    # Subset data for the current subgroup based on variable1
+    subgroup_data <- data[data[[variable1]] == subgroup, ]
+    
+    # Check if subgroup_data is empty
+    if (nrow(subgroup_data) == 0) {
+      next
+    }
+    # Perform normality test (Shapiro-Wilk)
+    normality_test <- shapiro.test(as.numeric(subgroup_data[[value]]))
+    
+    # Perform Bartlett test for homogeneity of variances
+    bartlett_test <- bartlett.test(subgroup_data[[value]], subgroup_data[[variable2]])
+    
+    if (normality_test$p.value > 0.05 & bartlett_test$p.value > 0.05) {
+      # If both normality and homogeneity are met, perform ANOVA
+      anova_result <- aov(subgroup_data[[value]] ~ subgroup_data[[variable2]])
+      tukey_result <- TukeyHSD(anova_result)
+      statement_return[[subgroup]] <- list(anova_result = anova_result, tukey_result = tukey_result)
+    } else {
+      # If either normality or homogeneity is violated, perform non-parametric test
+      kruskal_result <- kruskal.test(subgroup_data[[value]] ~ subgroup_data[[variable2]])
+      wilcox_result <- pairwise.wilcox.test(subgroup_data[[value]], subgroup_data[[variable2]], p.adjust.method = "BH")
+      #Added dunntest because that is the one that is preferably used
+      dunntest_result <- dunnTest(subgroup_data[[value]] ~ subgroup_data[[variable2]], method = "bh")
+      statement_return[[subgroup]] <- list(kruskal_result = kruskal_result, wilcox_result = wilcox_result, dunntest_result = dunntest_result)
+    }
+  }
+  
+  return(statement_return)
+}
+```
+
+### Taxonomy Bar Graph function
+
+```{r}
+# Input should be presence absence physeq
+plot_grouped_taxa_bar <- function(ps_obj, 
+                                  merge_var,
+                                  level = "Class", 
+                                  higher_level = "Phylum", 
+                                  threshold = 3.5,
+                                  palette = "Set2") {
+  
+   pretty_names <- function(x) {
+    s <- gsub("_", " ", x)
+    tools::toTitleCase(s)
+  }
+  
+  # Create a list to control order of bars
+   order_graphs <- unique(sample_data(ps_obj)[[merge_var]])
+   
+   
+  # Merge and normalize
+  ps_merged <- merge_samples(ps_obj, merge_var)
+  ps_rel <- transform_sample_counts(ps_merged, function(x) x / sum(x) * 100)
+  ps_tax <- tax_glom(ps_rel, taxrank = level, NArm = FALSE)
+  
+  # Clean taxonomy
+  taxdf <- as.data.frame(tax_table(ps_tax))
+  taxdf[[level]] <- as.character(taxdf[[level]])
+  taxdf[[higher_level]] <- as.character(taxdf[[higher_level]])
+  
+  ambiguous <- is.na(taxdf[[higher_level]]) |
+    tolower(taxdf[[higher_level]]) == "unknown" |
+    grepl("incertae", taxdf[[higher_level]], ignore.case = TRUE) |
+    grepl("unclassified", taxdf[[higher_level]], ignore.case = TRUE)
+  taxdf[[higher_level]][ambiguous] <- "Unclassified"
+  taxdf[[level]][ambiguous] <- "Unclassified"
+  
+  # Collapse low-abundance phyla into a single group
+  abund_phylum <- tapply(taxa_sums(ps_tax), taxdf[[higher_level]], sum)
+  rel_abund_phylum <- abund_phylum / sum(abund_phylum) * 100
+  low_phyla <- names(rel_abund_phylum[rel_abund_phylum < threshold])
+  taxdf[[higher_level]][taxdf[[higher_level]] %in% low_phyla] <- "Other_Phyla"
+  taxdf[[level]][taxdf[[higher_level]] == "Other_Phyla"] <- "Other_Phyla"
+  
+  # n Collapse low-abundance classes (only for remaining phyla)
+  abund <- taxa_sums(ps_tax) / sum(taxa_sums(ps_tax)) * 100
+  low_taxa <- setdiff(names(abund[abund < threshold]),
+                      rownames(taxdf)[taxdf[[level]] %in% c("Unclassified", "Other_Phyla")])
+  
+  taxdf[[level]][rownames(taxdf) %in% low_taxa] <- paste0("Other_", taxdf[[higher_level]][rownames(taxdf) %in% low_taxa])
+  # Collapse and reapply taxonomy
+  tax_table(ps_tax) <- tax_table(as.matrix(taxdf))
+  ps_tax <- tax_glom(ps_tax, taxrank = level)
+  taxdf <- as.data.frame(tax_table(ps_tax))
+  
+  # Order phyla and classes by abundance
+  abund_df <- psmelt(ps_tax)
+  abund_summary <- aggregate(Abundance ~ get(higher_level) + get(level), data = abund_df, sum)
+  colnames(abund_summary) <- c(higher_level, level, "Abundance")
+  phyla_order <- aggregate(Abundance ~ get(higher_level), data = abund_summary, sum)
+  colnames(phyla_order) <- c(higher_level, "Total")
+  phyla_order <- phyla_order[order(-phyla_order$Total), ]
+  
+  taxdf[[higher_level]] <- factor(taxdf[[higher_level]], levels = phyla_order[[higher_level]])
+  taxdf[[level]] <- factor(taxdf[[level]], levels = abund_summary[order(
+    match(abund_summary[[higher_level]], phyla_order[[higher_level]]),
+    -abund_summary$Abundance
+  ), level])
+  tax_table(ps_tax) <- tax_table(as.matrix(taxdf))
+  
+  # Color palette - use shuffled order just for color assignment
+  phyla_ordered <- levels(taxdf[[higher_level]])
+  phyla_shuffled <- phyla_ordered[order(nchar(phyla_ordered), phyla_ordered)]
+  
+  base_colors <- brewer.pal(min(length(phyla_shuffled), 8), palette)
+  if (length(phyla_shuffled) > length(base_colors)) {
+    base_colors <- colorRampPalette(brewer.pal(8, palette))(length(phyla_shuffled))
+  }
+  phylum_colors <- setNames(base_colors, phyla_shuffled)
+  
+  # Shades for class-level coloring (using original phylum order for logic)
+  class_colors <- c()
+  for (ph in phyla_ordered) {
+    classes <- unique(taxdf[[level]][taxdf[[higher_level]] == ph])
+    n <- length(classes)
+    if (n > 0) {
+      base_col <- phylum_colors[ph]
+      shades <- colorRampPalette(c("gray90", base_col, "black"))(n + 4)[2:(n + 1)]
+      class_colors <- c(class_colors, setNames(shades, classes))
+    }
+  }
+  
+  # Legend labels
+  legend_labels <- setNames(
+    pretty_names(paste0(names(class_colors), " (", taxdf[[higher_level]][match(names(class_colors), taxdf[[level]])], ")")),
+    names(class_colors)
+  )
+  
+  # Plot
+  p <- plot_bar(ps_tax, fill = level, title = paste("Barplot of ",level," with abundance of more than ", threshold,"%"))
+  p$data[[level]] <- factor(p$data[[level]], levels = levels(taxdf[[level]]))
+  
+  # Remove the original geom_bar and add a new one with no border
+  p$layers <- NULL  # remove default geom_bar layer
+  
+  p <- p +
+    scale_x_discrete(limits = order_graphs) +
+    geom_bar(stat = "identity", position = "stack", color = NA) +  # <- no borders
+    scale_fill_manual(values = class_colors, labels = legend_labels) +
+    theme_minimal() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 9)) +
+    labs(y = "Relative abundance (%)")
+  return(p)
+}
+
+```
+
+# ITS
+
+## 0.1 Decontam ITS phyloseq
+
+```{r}
+otu_table=read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/Input_data/ITS_spring23_ASV_Unrarefied_simplefied.csv",row.names=1, header = T)
+head(otu_table)
+otu_table=as.matrix(otu_table)
+mean(colSums(otu_table))
+nrow(otu_table)
+
+taxonomy=read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/Input_data/080425-Taxa_list_all_eurkaryotes_and_ASVs.csv", row.names=1, header = T)
+taxonomy$sequence <- NULL
+replace(taxonomy, taxonomy == " ", NA) -> tax1
+taxonomy1=as.matrix(tax1)
+
+## Metadata
+metadata=read.csv("./Input_data/FA_metadata_ITS.csv", row.names=1)
+
+rownames(metadata) <- metadata$SampleID
+
+TAX = tax_table(as.matrix(taxonomy1))
+OTU=otu_table(otu_table, taxa_are_rows=TRUE)
+META=sample_data(metadata)
+physeq_ITS_full_set=phyloseq(OTU, META, TAX)
+
+```
+
+```{r}
+#settings
+theme_set(theme_bw())
+options(stringsAsFactors = FALSE)
+path.in <- "G:/My Drive/CityDeal/Data_analysis_after_review/Input_data" # CHANGE ME
+path.out <- "G:/My Drive/CityDeal/Data_analysis_after_review/Decntam" # CHANGE ME
+
+#color palettes
+cbbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000")
+methodPalette <- c(Frequency="darkorange2", Prevalence="turquoise3", Combined="darkorchid4")
+prevalencePalette <- c("2" = "#edf8e9", "3-5" = "#bae4b3", "6-10" = "#74c476", "11+" = "#238b45")
+
+#load phyloseq object
+load(file.path(path.in, "physeq_ITS_full_set"))
+physeq_ITS_full_set
+```
+
+Classify contaminants
+
+```{r}
+conc2 <- physeq_ITS_full_set@sam_data$ng.uL # ng/ul
+neg2 <- physeq_ITS_full_set@sam_data$sample_control == 'neg_control' # True if a negative control sample
+# Frequency-based contaminant classification
+ocf <- isContaminant(physeq_ITS_full_set, conc=conc2, threshold=0.1, detailed=TRUE, normalize=TRUE, method='frequency')
+# Prevalence-based contaminant classification
+ocp <- isContaminant(physeq_ITS_full_set, neg=neg2, threshold=0.1, detailed=TRUE, normalize=TRUE, method='prevalence')
+# Combined contaminant classification
+occ <- isContaminant(physeq_ITS_full_set, conc=conc2, neg=neg2, threshold=0.1, detailed=TRUE, normalize=TRUE, method='combined')
+```
+
+```{r}
+probcols <- data.frame(row.names=rownames(ocf),prob.f=ocf$p.freq, prob.p=ocp$p.prev, prob.c = occ$p)
+
+TAX2 <- as.matrix(physeq_ITS_full_set@tax_table)
+TAX2 <- cbind(TAX2, probcols[rownames(TAX2),])
+### MANY ASVs have NA, these all occur in only one sample. I will not remove them, because frankly we can be quite sure they are no contaminants
+# Crude comparison of frequency and prevalence contaminant assignment
+table(probcols$prob.f<0.1, probcols$prob.c<0.1)
+```
+
+bar plots
+
+```{r}
+# Augment with prevalence groups and Abundance column
+physeq_ITS_prev <- transform_sample_counts(physeq_ITS_full_set, function(x) ifelse(x>0, 1, 0))
+TAX2$TAXprev <- taxa_sums(physeq_ITS_prev)[rownames(TAX2)] # Add prevalences
+TAX2$Prevalence <- cut(TAX2$TAXprev, c(0, 2, 5, 10, 9999), labels=c("2", "3-5", "6-10", "11+"))
+
+TAXann <- rbind(cbind(TAX2, Score=TAX2$prob.f, Method="Frequency"),
+                cbind(TAX2, Score=TAX2$prob.p, Method="Prevalence"),
+                cbind(TAX2, Score=TAX2$prob.c, Method="Combined"))
+
+TAXann$Method <- factor(TAXann$Method, levels=c('Frequency','Prevalence','Combined'))
+prevalencePalette <- c("2" = "#edf8e9", "3-5" = "#bae4b3", "6-10" = "#74c476", "11+" = "#238b45")
+
+
+
+TAXannTest <- subset(TAXann, Method != "Prevalence")
+#figure 2b
+histo <- ggplot(TAXannTest, aes(x=Score, fill=Prevalence))
+histo
+histo <- histo + geom_histogram() + labs(x = 'decontam Score', y='Number ASVs') + 
+  facet_wrap(~Method, nrow=1) +
+  #http://colorbrewer2.org/#type=sequential&scheme=BuGn&n=4
+  scale_fill_manual(values=prevalencePalette) +
+  scale_y_sqrt()+
+ # theme(axis.text.x = element_text(colour="grey20",size=10,angle=0,
+ #                                   hjust=.5,vjust=.5,face="plain"),
+ #       axis.text.y = element_text(colour="grey20",size=10,angle=0,
+ #                                  hjust=1,vjust=0,face="plain"),
+ #       axis.title.x = element_text(colour="grey20",size=15,angle=0,
+ #                                   hjust=.5,vjust=0,face="plain"),
+ #       axis.title.y = element_text(colour="grey20",size=15,angle=90,
+ #                                   hjust=.5,vjust=.5,face="plain"),
+ #       strip.text.x = element_text(size = 15, angle = 0),
+ #       legend.title = element_text(size = 15, angle = 0),
+ #       legend.text = element_text(size = 10, angle = 0)) +
+  theme(legend.position = "bottom")
+histo
+ggsave("./Decontam/ITS_histograms.png",width = 15, height =30,
+units = "in", dpi = 600 )
+```
+
+The clearest distinction can bee seen for the Prevelance method, so I will go with that one. However, Frequence 0.25 would also make sense, as would combined 0.25
+
+```{r}
+Check_contamination <- as.data.frame(sample_data(physeq_ITS_full_set)) # Put sample_data into a ggplot-friendly data.frame
+Check_contamination$LibrarySize <- sample_sums(physeq_ITS_full_set)
+Check_contamination <- Check_contamination[order(Check_contamination$LibrarySize),]
+Check_contamination$Index <- seq(nrow(Check_contamination))
+ggplot(data=Check_contamination, aes(x=Index, y=LibrarySize, color=sample_control)) + geom_point()
+ggsave("./Decontam/Contamination_ITS_full.png")
+```
+
+Remove the contamination (I know, I could have just filtered on the p-value)
+
+```{r}
+contamdf.prev <- isContaminant(physeq_ITS_full_set, method="combined", conc=conc2, neg=neg2, threshold = 0.2, detailed=TRUE, normalize=TRUE)
+table(contamdf.prev$contaminant)
+```
+
+328 contaminations were found, time to remove them
+
+```{r}
+# Make phyloseq object of presence-absence in negative controls and true samples
+ps.pa.neg <- prune_samples(physeq_ITS_prev@sam_data$sample_control == "neg_control", physeq_ITS_prev)
+ps.pa.pos <- prune_samples(sample_data(physeq_ITS_prev)$sample_control == "real_sample", physeq_ITS_prev)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                      contaminant=contamdf.prev$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+ps.noncontam <- prune_taxa(!contamdf.prev$contaminant, physeq_ITS_full_set)
+ps.noncontam
+```
+
+```{r}
+#save.image("./0.1.ITS_contamination.RData")
+rm(list=setdiff(ls(), "physeq_bacterial_only"))
+```
+
+## 0. Filtering Phyloseq object
+
+Filtering the metadata
+
+```{r}
+physeq_ITS <- ps.noncontam
+metadata=read.csv("G:/My Drive/CityDeal/Metadata/Metadata_per_sample.csv", row.names=1)
+samples_stoep <- rownames(metadata[(metadata$topology == "Stoep_bomen"),])
+# In my case the metadata has multiple experiments in there. Here you could filter them on column
+  metadata <- metadata[metadata$experiment=="CityDeal",]
+  metadata <- metadata[!grepl("^Lin", rownames(metadata)),]
+  metadata <- metadata[!grepl("^Gras", rownames(metadata)),]
+  metadata <- subset(metadata, Sample_or_Control != "Control")
+  #rownames(metadata)[rownames(metadata)=="T1A2B.C"] <- "T1A2B"
+  metadata <- metadata[rownames(metadata) != "T1A2B.B", ]
+  metadata <- metadata[rownames(metadata) != "T1A2B.A", ] 
+# The filtering is now complete. Some of the metadata has to be translated though
+metadata$topology <- gsub("Weg_bomen", "Street_with_trees", metadata$topology)
+metadata$topology <- gsub("Stoep_bomen", "Sidewalk_with_trees", metadata$topology)
+metadata$topology <- gsub("Stoep_geenbomen", "Sidewalk_without_trees", metadata$topology)
+metadata$topology <- gsub("Weg_geenbomen", "Street_without_trees", metadata$topology)
+metadata$topology <- gsub("Boomspiegel", "Treepit", metadata$topology)
+
+## Add to phyloseq
+META <- as.matrix(metadata)
+META=sample_data(metadata)
+sam_data(physeq_ITS) <- META
+physeq_ITS
+setdiff(rownames(metadata), rownames(physeq_ITS@sam_data))
+# remove non-fungal
+physeq_fungal_only <- subset_taxa(physeq_ITS, Kingdom == "Fungi")
+
+physeq_fungal_only
+table_nozeroes <- as.data.frame(physeq_fungal_only@otu_table) %>% filter(rowSums(as.data.frame(physeq_fungal_only@otu_table))>0)
+dim(table_nozeroes)
+mean(colSums(table_nozeroes))
+
+setdiff(samples_stoep, rownames(sample_data(physeq_fungal_only)))
+
+```
+
+```{r}
+save.image("./0.ITS_phyloseqs.RData")
+rm(list=setdiff(ls(), "physeq_fungal_only"))
+```
+
+## 2. ITS Rarefaction
+
+```{r}
+sequencing_depth <- as.data.frame(sample_sums(physeq_fungal_only))
+#write.csv(df, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS/ITSsequencing_depth_raw.csv")
+physeq_fungal_only_sub <- subset_samples(physeq_fungal_only, sample_sums(physeq_fungal_only)>=10000)
+# rarefy your dataset to lowest sequencing length or a custom number, 711 should be kept constant:
+phy_rare <- rarefy_even_depth(phy_rare,rngseed = 711, replace = F, trimOTUs = TRUE, 	verbose = F)
+phy_rare
+colSums(phy_rare@otu_table)
+## We did lose 23 samples in this process. 
+# Sample names before rarefaction
+lost_samples <- setdiff(rownames(sample_data(physeq_fungal_only)),rownames(sample_data(phy_rare)))
+lost_samples
+colSums(otu_table(phy_rare))
+```
+
+### Supp fig 1; rarefaction curves
+
+```{r}
+## ITS rarefaction Curfe unrarefied
+ITS_rarefaction_curve <- ggrare(physeq_fungal_only, step =500, color = "topology", se = F)
+
+rarefaction_curve_ITS <- ITS_rarefaction_curve + mytheme + 
+  scale_color_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECA1')) +
+  labs( 
+    x ="Number of reads",
+    y ="Total ASVs"
+    )
+rarefaction_curve_ITS
+ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_ITS_raw_test.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+## ITS rarefaction curve after rarefaction
+ITS_rarefaction_curve_RF10000 <- ggrare(phy_rare, step = 100, color = "topology", se = F)
+
+rarefaction_curve_ITS_RF <- ITS_rarefaction_curve_RF10000 + mytheme + 
+  scale_color_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECA1')) +
+  labs( 
+    x ="Number of reads",
+    y ="Total ASVs"
+    )
+rarefaction_curve_ITS_RF
+ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_ITS_RF11718_test.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+```
+
+```{r}
+save.image("./2.ITS_Rarefaction.RData")
+rm(ITS_rarefaction_curve,ITS_rarefaction_curve_RF10000,rarefaction_curve_ITS, rarefaction_curve_ITS_RF,sequencing_depth, lost_samples)
+```
+
+## 3. Fungal alpha
+
+For statistics, I wrote an over-complicated function because I was relatively new at R and thought it would be more efficient. Ofcourse it was not, but I learned a lot in the process I guess. Since the function is there we might as well use it ;)
+
+### Figure 2B
+
+Testing alpha diversity after rarefaction
+
+```{r}
+## Rarefied; add richness parameters
+Richnes_parameters <- estimate_richness(phy_rare, measures=c("Observed", "InvSimpson", "Shannon", "Chao1"))
+
+enriched_meta <- merge(as.data.frame(phy_rare@sam_data), Richnes_parameters, by = "row.names", all.x = TRUE)
+# And add groups (city-topology)
+enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
+write.csv(enriched_meta, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_enriched_meta_rarefied_test.csv")
+phy_rare@sam_data <- sample_data(enriched_meta)
+
+enriched_meta$topology = factor(enriched_meta$topology, levels = c("Treepit","Sidewalk_with_trees","Street_with_trees", "Sidewalk_without_trees", "Street_without_trees"))
+
+enriched_meta = enriched_meta[order(enriched_meta$topology), ]
+head(enriched_meta)
+richness_all_c <- ggplot(data = enriched_meta,
+                         aes(x=topology, y = Observed, fill=topology))+
+  geom_boxplot(lwd=1.5)+
+  #facet_grid(.~city, scales="free") + # For supplemental
+  expand_limits(y=0:1000) +
+  scale_y_continuous(breaks=seq(0,6000, by=200)) +
+  labs(x="City", y="Richness ASVs", title="ASV Richness ITS")+
+  #theme_bw()+
+  scale_fill_manual(values=c('#FEECC8','#FFABAB','#DBFFD6', '#ACE7FF', '#ECD4FF')) +
+  mytheme +
+   theme(text = element_text(size=12),
+         legend.text = element_text(size=12),
+         axis.title=element_text(size=14),
+         axis.text.x = element_text(size=12, angle = 90, hjust = 0.5, vjust=0.5),
+         axis.text.y = element_text(size=12))
+        #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+richness_all_c
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Alpha_div_fig2.png", width = 15, height =10,units = "in", dpi = 600)
+
+## For each city and topology apart
+stats_rarefied_topo_city <- compare_variables_function(enriched_meta, "topology", "city", "Observed")
+stats_rarefied_city_topo <- compare_variables_function(enriched_meta, "city", "topology", "Observed")
+stats_rarefied_city_topo
+
+#and for the total dataset
+normality_rar <- shapiro.test(enriched_meta$Observed)
+homogeinity_rar <- bartlett.test(enriched_meta$Observed, phy_rare@sam_data$group) 
+# Check, we'll need Kruskall wallis
+
+kruskal_rar <- kruskal.test(enriched_meta$Observed ~ enriched_meta$topology)
+wilcox_rar <- pairwise.wilcox.test(enriched_meta$Observed, enriched_meta$topology, p.adjust.method = "BH")
+
+wilcox_rar
+
+kruskal_rar
+metadata_rarefied <- enriched_meta
+# metadata_rarefied <- as.data.frame(sample_data(phy_rare))  
+# metadata_rarefied <- t(metadata_rarefied)
+# metadata_rarefied <- as.data.frame(metadata_rarefied)
+metadata_rarefied$Observed <- as.numeric(metadata_rarefied$Observed)
+median_per_typology <- aggregate(Observed ~ topology, data = metadata_rarefied, median)
+
+median_per_typology
+```
+
+### unrarefied sensitivity check
+
+```{r}
+## Rarefied; add richness parameters
+Richnes_parameters <- estimate_richness(physeq_fungal_only, measures=c("Observed", "InvSimpson", "Shannon", "Chao1"))
+
+enriched_meta <- merge(as.data.frame(physeq_fungal_only@sam_data), Richnes_parameters, by = "row.names", all.x = TRUE)
+# And add groups (city-topology)
+enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
+
+physeq_fungal_only@sam_data <- sample_data(enriched_meta)
+
+enriched_meta$topology = factor(enriched_meta$topology, levels = c("Treepit","Sidewalk_with_trees","Street_with_trees", "Sidewalk_without_trees", "Street_without_trees"))
+
+enriched_meta = enriched_meta[order(enriched_meta$topology), ]
+head(enriched_meta)
+richness_all_c_unrar <- ggplot(data = enriched_meta,
+                         aes(x=topology, y = Observed, fill=topology))+
+  geom_boxplot(lwd=0.1)+
+  #facet_grid(.~city, scales="free") +
+  expand_limits(y=0:1000) +
+  scale_y_continuous(breaks=seq(0,6000, by=1000)) +
+  labs(x="City", y="Richness ASVs", title="ASV Richness ITS")+
+  #theme_bw()+
+  scale_fill_manual(values=c('#FEECC8','#FFABAB','#DBFFD6', '#ACE7FF', '#ECD4FF')) +
+  mytheme +
+   theme(text = element_text(size=12),
+         legend.text = element_text(size=12),
+         axis.title=element_text(size=14),
+         axis.text.x = element_text(size=12, angle = 90, hjust = 0.5, vjust=0.5),
+         axis.text.y = element_text(size=12))
+        #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+richness_all_c_unrar
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Alpha_div_unrar_supp.png", width = 15, height =10,
+units = "in", dpi = 600)
+
+## For each city and topology apart
+stats_rarefied_topo_city_unrar <- compare_variables_function(enriched_meta, "topology", "city", "Observed")
+stats_rarefied_city_topo_unrar <- compare_variables_function(enriched_meta, "city", "topology", "Observed")
+stats_rarefied_city_topo_unrar
+
+metadata_unrarefied <- enriched_meta
+
+#and for the total dataset
+normality_unrar <- shapiro.test(enriched_meta$Observed)
+homogeinity_unrar <- bartlett.test(enriched_meta$Observed, physeq_fungal_only@sam_data$group) 
+# Check, we'll need Kruskall wallis
+
+kruskal_umrar <- kruskal.test(enriched_meta$Observed ~ enriched_meta$topology)
+wilcox_umrar <- pairwise.wilcox.test(enriched_meta$Observed, enriched_meta$topology, p.adjust.method = "BH")
+
+wilcox_umrar
+
+
+```
+
+Save some files
+
+```{r}
+
+metadata_rarefied <- as.data.frame(sample_data(phy_rare))
+
+## Don't ask me why, but had to transform it twice, because it wouldn't save it otherwise. So I just accepted it and moved on with my life.
+rownames(metadata_rarefied) <- metadata_rarefied$Row.names
+metadata_rarefied <- t(metadata_rarefied)
+write.csv(t(metadata_rarefied), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_rarefied_test.csv")
+
+
+metadata_unrarefied <- as.data.frame(sample_data(physeq_fungal_only))
+rownames(metadata_unrarefied) <- metadata_unrarefied$Row.names
+metadata_unrarefied <- t(metadata_unrarefied)
+write.csv(t(metadata_unrarefied), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied_test.csv")
+
+```
+
+```{r}
+save.image("./3.ITS_Alpha_diversity_Fig2.RData")
+rm(list=setdiff(ls(), c("physeq_fungal_only_sub","phy_rare","mytheme")))
+```
+
+## 3.1 Taxonomomic analysis
+
+```{r}
+## Make presence absence phyloseq
+
+## little fixup
+#rownames(physeq_fungal_only@sam_data) <- physeq_fungal_only@sam_data$Row.names
+
+physeq_fungal_only_pres_abs <- transform_sample_counts(physeq_fungal_only_sub, function(abund) 1*(abund>0))
+physeq_fungal_only_pres_abs@sam_data$topology = factor(physeq_fungal_only_pres_abs@sam_data$topology, levels = c("Treepit","Sidewalk_with_trees","Street_with_trees", "Sidewalk_without_trees", "Street_without_trees"))
+physeq_fungal_only_pres_abs@sam_data = physeq_fungal_only_pres_abs@sam_data[order(physeq_fungal_only_pres_abs@sam_data$topology), ]
+physeq_fungal_only_pres_abs@sam_data
+```
+
+```{r}
+barplot_ITS_taxa <- plot_grouped_taxa_bar(physeq_fungal_only_pres_abs, merge_var = "topology", level ="Class", higher_level = "Phylum", threshold = 3.5, palette = "Set3")
+barplot_ITS_taxa
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Taxonomy_fig3.png", width = 15, height =10,units = "in", dpi = 600)
+
+```
+
+### Statistics
+
+Ancom-bc is a good method to do the statistics behind this. It is compositional aware and does a (Sampling/pcr) bias correction. Input is normal phyloseq
+
+```{r}
+run_deseq2_phyloseq <- function(
+  physeq,
+  tax_rank = "Phylum",          # e.g. "Phylum", "Genus", or NULL for ASV
+  design_formula = ~ city + topology,
+  size_factor_type = "poscounts"
+) {
+topos <- levels(colData(dds_phylum)$topology)
+pairs <- combn(topos, 2, simplify = FALSE)
+  # 1. Aggregate if taxonomic rank is given
+  if (!is.null(tax_rank)) {
+    stopifnot(tax_rank %in% rank_names(physeq))
+    physeq <- tax_glom(physeq, taxrank = tax_rank)
+  }
+
+  # 2. Remove zero-count taxa
+  physeq <- prune_taxa(taxa_sums(physeq) > 0, physeq)
+
+  # 3. Convert to DESeq2
+  dds <- phyloseq_to_deseq2(physeq, design_formula)
+
+  # 4. Estimate size factors (robust to zeros)
+  dds <- estimateSizeFactors(dds, type = size_factor_type)
+
+  # 5. Run DESeq2
+  dds <- DESeq(dds)
+
+  return(dds)
+}
+
+```
+
+```{r}
+dds_phylum <- run_deseq2_phyloseq(
+  physeq_fungal_only,
+  tax_rank = "Phylum",
+  design_formula = ~ city + topology
+)
+levels(colData(dds_phylum)$topology)
+
+all_contrasts <- lapply(pairs, function(p) {
+
+  res <- results(
+    dds_phylum,
+    contrast = c("topology", p[1], p[2]),
+    alpha = 0.05
+  )
+
+  as.data.frame(res) %>%
+    rownames_to_column("Phylum") %>%
+    mutate(
+      contrast = paste(p[1], "vs", p[2])
+    )
+})
+
+all_contrasts_df <- bind_rows(all_contrasts)
+
+all_contrasts_df <- all_contrasts_df %>%
+  mutate(padj_global = p.adjust(pvalue, method = "fdr"))
+all_contrasts_df$ASV <- all_contrasts_df$Phylum
+```
+
+```{r}
+## Atach taxonomy\
+rep_ASVs <- all_contrasts_df$ASV
+Phyla <- as.data.frame(physeq_bacterial_only@tax_table)
+all_contrasts_df$Phylum <- Phyla[all_contrasts_df$ASV, "Phylum"]
+write.csv(all_contrasts_df, "./3.1_ITS_Functional_analysis_statistics_order.csv")
+```
+
+Finding patterns:
+
+```{r}
+
+contrasts_sig_table <- all_contrasts_df %>%
+  separate(contrast, into = c("g1", "g2"), sep = " vs ") %>%
+  mutate(
+    sig = padj_global < 0.05,
+    direction = case_when(
+      log2FoldChange > 0 ~ 1,
+      log2FoldChange < 0 ~ -1,
+      TRUE ~ 0
+    )
+  )
+
+
+scores_contrasts <- contrasts_sig_table %>%
+  mutate(
+    g1_score = ifelse(sig, direction, 0),
+    g2_score = ifelse(sig, -direction, 0)
+  ) %>%
+  select(Phylum, g1, g2, g1_score, g2_score) %>%
+  pivot_longer(
+    cols = c(g1, g2),
+    names_to = "which",
+    values_to = "group"
+  ) %>%
+  mutate(score = ifelse(which == "g1", g1_score, g2_score)) %>%
+  group_by(Phylum, group) %>%
+  summarise(score = sum(score), .groups = "drop")
+
+
+nonsig_pairs <- contrasts_sig_table %>%
+  filter(!sig) %>%
+  select(Phylum, g1, g2)
+
+
+build_pattern <- function(phylum) {
+  
+  s <- scores_contrasts%>% filter(Phylum == phylum) %>% arrange(desc(score))
+  ns <- nonsig_pairs %>% filter(Phylum == phylum)
+
+  groups <- list()
+  
+  for (g in s$group) {
+    placed <- FALSE
+    
+    for (i in seq_along(groups)) {
+      ref <- groups[[i]][1]
+      
+      tied <- ns %>%
+        filter((g1 == g & g2 == ref) | (g1 == ref & g2 == g)) %>%
+        nrow() > 0
+      
+      if (tied) {
+        groups[[i]] <- c(groups[[i]], g)
+        placed <- TRUE
+        break
+      }
+    }
+    
+    if (!placed) groups[[length(groups) + 1]] <- g
+  }
+  
+  paste(
+    sapply(groups, function(x) paste(x, collapse = " = ")),
+    collapse = " > "
+  )
+}
+
+
+patterns_equal <- scores_contrasts %>%
+  distinct(Phylum) %>%
+  rowwise() %>%
+  mutate(pattern = build_pattern(Phylum)) %>%
+  ungroup()
+
+filter(patterns_equal, Phylum == "Verrucomicrobiota")
+```
+
+```{r}
+save.image("./3.1_ITS_Functional_analysis.RData")
+
+```
+
+## 4. PCOA - Beta Div
+
+### CLR
+
+We'll use a different kind of transformation for this:
+
+```{r}
+
+## Little patch-up
+#sample_names(physeq_fungal_only)<- sample_data(physeq_fungal_only)$Row.names
+
+## Perform CLR transformation
+ps_clr_ITS <- transform_sample_counts(
+  physeq_fungal_only_sub,
+  function(x) clr(x + 1)
+)
+
+ps_clr_ITS
+dist_aitch <- phyloseq::distance(ps_clr_ITS, method = "euclidean")
+ord <- ordinate(ps_clr_ITS, method = "PCoA", distance = dist_aitch)
+plot_ordination(ps_clr_ITS, ord, color = "topology", shape = "city")
+
+
+
+
+# Add metadata
+meta <- as.data.frame(sample_data(ps_clr_ITS))
+meta$SampleID <- rownames(meta)
+meta$Streetpair <- substr(meta$SampleID, 0, 3)
+meta$Streetpair <- gsub("o","", meta$Streetpair)
+meta$Streetpair <- substr(meta$Streetpair, 0, 2)
+meta <- t(meta)
+write.csv(t(meta), "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied.csv")
+
+meta <- as.data.frame(t(meta))
+
+# meta <- read.csv("./ITS_metadata_unrarefied_test.csv", row.names = 1)
+# 
+# # Extract sample scores
+scores <- as.data.frame(ord$vectors)
+scores$SampleID <- rownames(scores)
+averages <- left_join(scores, meta, by = "SampleID")
+
+df_sum <- averages %>%
+  group_by(topology, city) %>%
+  summarise(
+    Axis1_mean = mean(Axis.1),
+    Axis2_mean = mean(Axis.2),
+    Axis3_mean = mean(Axis.3),
+    Axis4_mean = mean(Axis.4),
+    Axis1_se = sd(Axis.1) / sqrt(n()),
+    Axis2_se = sd(Axis.2) / sqrt(n()),
+    Axis3_se = sd(Axis.3) / sqrt(n()),
+    Axis4_se = sd(Axis.4) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+
+ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
+                   fill = topology, shape = city)) +
+  geom_errorbar(
+    aes(ymin = Axis2_mean - Axis2_se,
+        ymax = Axis2_mean + Axis2_se),
+    width = 0, 
+    linewidth = 1
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis1_mean - Axis1_se,
+        xmax = Axis1_mean + Axis1_se),
+    height = 0, 
+    linewidth = 1
+  ) +
+  geom_point(size = 5, stroke = 1.5) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA1: ", round(ord$values$Relative_eig[1] * 100, 2), "%", sep=""),
+    y=paste("PCoA2: ", round(ord$values$Relative_eig[2] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
+
+## Second and Third axis
+ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis3_mean - Axis3_se,
+        ymax = Axis3_mean + Axis3_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis2_mean - Axis2_se,
+        xmax = Axis2_mean + Axis2_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA2: ", round(ord$values$Relative_eig[2] * 100, 2), "%", sep=""),
+    y=paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC2_PC3_test.png",width = 15, height = 10, units = "in", dpi = 600)
+
+## Third and Fourth axis
+ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis4_mean - Axis4_se,
+        ymax = Axis4_mean + Axis4_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis3_mean - Axis3_se,
+        xmax = Axis3_mean + Axis3_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep=""),
+    y=paste("PCoA4: ", round(ord$values$Relative_eig[4] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_Eucledian_distance_PC3_PC4_test.png",width = 15, height = 10, units = "in", dpi = 600)
+```
+
+#### Permanova-clr
+
+```{r}
+adonis2(dist_aitch ~  topology, strata = meta$Streetpair,  data=as.data.frame(meta))
+adonis2(dist_aitch ~  city, data=as.data.frame(meta))
+
+
+beta_disp <- betadisper(dist_aitch, meta$topology)
+anova(beta_disp)  # Tests if dispersion is significantly different
+permutest(beta_disp)  # Permutation test for dispersion
+permutest(beta_disp, pairwise = TRUE)
+
+
+beta_disp <- betadisper(dist_aitch, meta$city)
+anova(beta_disp)  # Tests if dispersion is significantly different
+permutest(beta_disp)  # Permutation test for dispersion
+permutest(beta_disp, pairwise = TRUE)
+```
+
+```{r}
+## always difficulties with Phyloseq sample info to dataframe, fastest way is to just load the metadata csv. 
+meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/ITS_metadata_unrarefied.csv", row.names = 1)
+# PERMANOVA for individual variables
+adonis_city <- adonis2(dist_aitch ~ city, data=as.data.frame(meta))
+adonis_city
+adonis_topology <- adonis2(dist_aitch ~ topology, strata = meta$Streetpair, data= meta)
+adonis_topology
+adonis_streetname <- adonis2(dist_aitch ~ Streetpair, data= meta)
+adonis_streetname
+adonis_covering <- adonis2(dist_aitch ~ bedekking, data= meta)
+adonis_covering
+# adonis_typestraat <- adonis2(dist_aitch ~ type_straat, data= metadata_bact)
+# adonis_covering
+#adonis_covertree <- adonis2(dist_aitch ~ covertree, data = metadata_fungi)
+#adonis_covertree
+###Permanova assumes equal dispersion amongst groups
+#beta_disp <- betadisper(dist_aitch, meta$Group)
+#anova(beta_disp)  # Tests if dispersion is significantly different
+#permutest(beta_disp)  # Permutation test for dispersion
+
+# PERMANOVA for interaction (combination)
+adonis_combination <- adonis2(dist_aitch ~ topology * city, data =meta)
+
+PairPermITS <- pairwise.perm.manova(dist_aitch, meta$city, test="Pillai", nperm = 999, p.method = "fdr", F = TRUE, R2 = TRUE)
+PairPermITS
+PairPermITS$F.value
+
+pairpermits2 <- pairwise.perm.manova(dist_aitch, meta$topology, test="Pillai", nperm = 999, p.method = "fdr", F = TRUE, R2 = TRUE)
+pairpermits2
+pairpermits2$F.value
+
+street_pairperm <- pairwise.perm.manova(dist_aitch, meta$street, test = "Pillai", nperm =999, p.method = "fdr",F=T,R2=T)
+# 
+# pairperm_covertree <- pairwise.perm.manova(dist_aitch, metadata_fungi$covertree, test = "pillai", nperm =999, p.method ="fdr", F=T, R2=T)
+# pairperm_covertree$R2.value
+
+## For pairwase manova:
+# higher F-value means that between-group variation is alrger relative to the within group variation
+# This generally means a stronger effect of the grouping variable
+# Display results
+
+# Flatten and bind rows
+combined_results <- bind_rows(
+  data.frame(Test = "Adonis_topology", adonis_topology),
+  data.frame(Test="Pairwise_permanova_topology", pairpermits2$p.value),
+  data.frame(Test = "Pairwise_topology_R2", pairpermits2$R2.value),
+  data.frame(Test = "Adonis_city", adonis_city),
+  data.frame(Test = "Pairwise_permanova_city", PairPermITS$p.value),
+  data.frame(Test = "R2_value_city", PairPermITS$R2.value),
+  data.frame(Test = "Adonis_streetname", adonis_streetname),
+  data.frame(Test = "Adonis_covering", adonis_covering),
+  #data.frame(Test = "Adonis_typestreet", adonis_typestraat),
+  #data.frame(Test = "Adonis_covertree", adonis_covertree),
+  #data.frame(Test = "Pairwise_covertree", pairperm_covertree$p.value),
+  #data.frame(Test = "R2_covertree", pairperm_covertree$R2.value),
+  .id = "Source"
+)
+street_df <- bind_rows(
+  data.frame(Test="p-value", street_pairperm$p.value),
+  data.frame(Test="R2_values", street_pairperm$R2.value)
+)
+
+write.csv(combined_results, "G:/My Drive/CityDeal/Data_analysis_after_review/ITS_PCOA_statistical_summary_aitch_test.csv")
+
+```
+
+From the statistics I gather that the Streetname is the biggest determinant (so, samples from the same street are alike, geographic location). Therefore I think I should plot that...
+
+I did not use this.
+
+### Rarefied - Bray
+
+```{r}
+# Small fixups in data structure
+meta <- read.csv("./ITS_metadata_rarefied.csv")
+meta$Sample
+ meta$X <- NULL
+ rownames(meta) <- meta$Row.names
+
+ITS_ordin_bray <- ordinate(phy_rare, method = "PCoA", distance = "bray")
+
+df_bray <- merge(ITS_ordin_bray$vectors[,1:2], meta, by = "row.names")
+row.names(df_bray) <- df_bray$Row.names
+df_bray <- df_bray[, -1] 
+
+# Extract sample scores
+scores <- as.data.frame(ITS_ordin_bray$vectors)
+scores$Row.names <- rownames(scores)
+averages <- left_join(scores, meta, by = "Row.names")
+
+df_sum <- averages %>%
+  group_by(topology, city) %>%
+  summarise(
+    Axis1_mean = mean(Axis.1),
+    Axis2_mean = mean(Axis.2),
+    Axis3_mean = mean(Axis.3),
+    Axis4_mean = mean(Axis.4),
+    Axis1_se = sd(Axis.1) / sqrt(n()),
+    Axis2_se = sd(Axis.2) / sqrt(n()),
+    Axis3_se = sd(Axis.3) / sqrt(n()),
+    Axis4_se = sd(Axis.4) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+
+ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis2_mean - Axis2_se,
+        ymax = Axis2_mean + Axis2_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis1_mean - Axis1_se,
+        xmax = Axis1_mean + Axis1_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA1: ", round(ITS_ordin_bray$values$Relative_eig[3] * 100, 2), "%", sep=""),
+    y=paste("PCoA2: ", round(ITS_ordin_bray$values$Relative_eig[4] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/Bray_ITS_rarefied_test.png",width = 15, height = 10, units = "in", dpi = 600)
+
+pcoa_bray_all <- ggplot(df_sum, aes(Axis.1,Axis.2, fill=topology, shape=city)) +
+  geom_point(size=5, alpha=0.7)+
+  labs(x=paste("PCoA1: ", round(ITS_ordin_bray$values$Relative_eig[1] * 100, 2), "%", sep=""),
+       y=paste("PCoA2: ", round(ITS_ordin_bray$values$Relative_eig[2] * 100, 2), "%", sep=""),
+       title="Bray") +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+pcoa_bray_all
+
+bray_distance <- phyloseq::distance(phy_rare, method = "bray")
+
+
+adonis2(bray_distance ~ topology, strata = meta$Streetpair, data = meta, permutations = 1e4)
+adonis2(bray_distance ~ topology, data = meta)
+
+
+bd_topo <- betadisper(bray_distance, meta$topology,)
+anova(bd_topo)
+plot(bd_topo)
+```
+
+### Jaccard
+
+```{r}
+meta <- phy_rare@sam_data
+rownames(meta) <- meta$Row.names
+
+ITS_ordin_jaccard <- ordinate(phy_rare, method = "PCoA", distance = "jaccard")
+
+
+df_jaccard <- merge(ITS_ordin_jaccard$vectors[,1:2], meta, by = "row.names")
+row.names(df_jaccard) <- df_jaccard$Row.names
+df_bray <- df_jaccard[, -1] 
+
+
+pcoa_jaccard_all <- ggplot(df_jaccard, aes(Axis.1,Axis.2, fill=topology, shape=city)) +
+  geom_point(size=5, alpha=0.7)+
+  labs(x=paste("PCoA1: ", round(ITS_ordin_bray$values$Relative_eig[1] * 100, 2), "%", sep=""),
+       y=paste("PCoA2: ", round(ITS_ordin_bray$values$Relative_eig[2] * 100, 2), "%", sep=""),
+       title="jaccard ITS") +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme 
+  
+
+pcoa_jaccard_all
+
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/Jaccard_figure_please_delete.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+
+
+jaccard_distance <- phyloseq::distance(phy_rare, method = "jaccard")
+
+adonis2(jaccard_distance ~ topology, strata = meta$city, data = meta, permutations = 1e3)
+adonis2(jaccard_distance ~ city, data = meta)
+
+
+bd_topo <- betadisper(jaccard_distance, meta$topology,)
+anova(bd_topo)
+plot(bd_topo)
+```
+
+### Raw data - Bray
+
+```{r}
+meta <- read.csv("./ITS_metadata_unrarefied.csv", row.names = 1)
+
+
+ITS_ordin_bray <- ordinate(physeq_fungal_only, method = "PCoA", distance = "bray")
+
+df_bray <- merge(ITS_ordin_bray$vectors[,1:2], meta, by = "row.names")
+row.names(df_bray) <- df_bray$Row.names
+df_bray <- df_bray[, -1] 
+
+# Extract sample scores
+scores <- as.data.frame(ITS_ordin_bray$vectors)
+scores$Row.names <- rownames(scores)
+averages <- left_join(scores, meta, by = "Row.names")
+
+df_sum <- averages %>%
+  group_by(topology, city) %>%
+  summarise(
+    Axis1_mean = mean(Axis.1),
+    Axis2_mean = mean(Axis.2),
+    Axis3_mean = mean(Axis.3),
+    Axis4_mean = mean(Axis.4),
+    Axis1_se = sd(Axis.1) / sqrt(n()),
+    Axis2_se = sd(Axis.2) / sqrt(n()),
+    Axis3_se = sd(Axis.3) / sqrt(n()),
+    Axis4_se = sd(Axis.4) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+
+ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis2_mean - Axis2_se,
+        ymax = Axis2_mean + Axis2_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis1_mean - Axis1_se,
+        xmax = Axis1_mean + Axis1_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA1: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep=""),
+    y=paste("PCoA2: ", round(ord$values$Relative_eig[4] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+bray_distance <- phyloseq::distance(physeq_fungal_only, method = "bray")
+
+adonis2(bray_distance ~ type_straat, strata = meta$city, data = meta, permutations = 1e3)
+adonis2(bray_distance ~ city, data = meta)
+
+```
+
+### Conclusion ITS - Alpha/beta
+
+Every tested matrix shows clearly that city is a defining factor for beta-diversity, while topology does not matter at all. Combined with the alpha diversity this means that the same fungi are found everywhere, but the treepit has a way higher number of fungi per sample. Baas Becking.
+
+```{r}
+save.image("./4.PCoA_ITS_CLR.RData")
+rm(list=setdiff(ls(), c("physeq_fungal_only_sub","phy_rare","ps_clr_ITS","mytheme")))
+```
+
+# 16S
+
+## 5. Making phyloseq object
+
+```{r}
+#reading files, you need four inputs: 
+#otu table, taxonomy table, metadata, and rooted tree
+
+ASV_table_16S =read.csv("./Input_data/Full_ASV_table_16s.csv", row.names=1, header = T)
+view(head(ASV_table_16S))
+#rownames(ASV_table_16S) <- ASV_table_16S$X
+#otu_table=as.matrix(ASV_table_16S)
+new_colnames <- colnames(ASV_table_16S)
+split_colnames <- lapply(new_colnames, str_split_i,pattern= "_", i=1)
+split_colnames <- unlist(split_colnames)
+colnames(ASV_table_16S) <- split_colnames
+
+taxonomy=read.csv("G:/My Drive/CityDeal/16S - Panji/16s_taxonomy.csv", row.names=1, header = T)
+replace(taxonomy, taxonomy == " ", NA) -> tax1
+taxonomy1=as.matrix(tax1)
+
+Metadata_FA_16S <- read.csv("./Input_data/FA_metadata_16S.csv")
+
+
+
+ 
+# metadata=read.csv("G:/My Drive/CityDeal/16S - Panji/metadata.csv", row.names=1)
+# metadata
+#META=sample_data(metadata)
+rownames(Metadata_FA_16S) <- Metadata_FA_16S$SampleID
+
+META<-sample_data(Metadata_FA_16S)
+OTU=otu_table(ASV_table_16S, taxa_are_rows=TRUE)
+TAX=tax_table(taxonomy1)
+
+
+
+#new_sample_names <- as.list(make.unique(sapply(strsplit(sample_names(OTU),"_"), `[`, 1)))
+#sample_names(OTU) <- new_sample_names
+
+#make the phyloseq object for downstream analysis
+physeq_16S_full=phyloseq(OTU, TAX, META)
+
+
+physeq_16S_full
+
+
+
+############ Filter OTU table ############
+
+
+```
+
+clean data
+
+```{r}
+save.image("./5.1.S16_phyloseq_full")
+rm(list=setdiff(ls(), "physeq_16S_full"))
+```
+
+## 6. Decontamination
+
+```{r}
+#Little patch up
+# physeq_16S@sam_data$Sample_or_Control <- physeq_16S@sam_data$sample
+# physeq_16S@sam_data$sample <- NULL
+
+Check_contamination <- as.data.frame(sample_data(physeq_16S_full)) # Put sample_data into a ggplot-friendly data.frame
+Check_contamination$LibrarySize <- sample_sums(physeq_16S_full)
+Check_contamination <- Check_contamination[order(Check_contamination$LibrarySize),]
+Check_contamination$Index <- seq(nrow(Check_contamination))
+ggplot(data=Check_contamination, aes(x=Index, y=LibrarySize, color=sample_control)) + geom_point()
+```
+
+Oke, there is clearly some major contamination in two plates
+
+```{r}
+#settings
+theme_set(theme_bw())
+options(stringsAsFactors = FALSE)
+path.in <- "G:/My Drive/CityDeal/Data_analysis_after_review/Input_data" # CHANGE ME
+path.out <- "G:/My Drive/CityDeal/Data_analysis_after_review/Decontam" # CHANGE ME
+
+#color palettes
+cbbPalette <- c("#E69F00", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7","#000000")
+methodPalette <- c(Frequency="darkorange2", Prevalence="turquoise3", Combined="darkorchid4")
+prevalencePalette <- c("2" = "#edf8e9", "3-5" = "#bae4b3", "6-10" = "#74c476", "11+" = "#238b45")
+
+```
+
+Check decontamination
+
+```{r}
+#physeq_16S_full@sam_data$ng.uL <- as.numeric(physeq_16S_full@sam_data$ng.uL)
+physeq_16S_no_control <- subset_samples(physeq_16S_full, sample_control == "real_sample")
+conc2 <- physeq_16S_no_control@sam_data$ng.uL # ng/ul
+neg2 <- physeq_16S_full@sam_data$sample_control == 'neg_control' # True if a negative control sample
+# Frequency-based contaminant classification
+ocf <- isContaminant(physeq_16S_no_control, conc=conc2, threshold=0.2, detailed=TRUE, normalize=TRUE, method='frequency')
+# Prevalence-based contaminant classification
+ocp <- isContaminant(physeq_16S_full, neg=neg2, threshold=0.2, detailed=TRUE, normalize=TRUE, method='prevalence')
+# Combined contaminant classification
+occ <- isContaminant(physeq_16S_full, conc=conc2, neg=neg2, threshold=0.2, detailed=TRUE, normalize=TRUE, method='combined')
+```
+
+figures
+
+```{r}
+
+probcols <- data.frame(row.names=rownames(ocf),prob.f=ocf$p.freq, prob.p=ocp$p.prev, prob.c = occ$p)
+
+TAX2 <- as.matrix(physeq_16S_full@tax_table)
+TAX2 <- cbind(TAX2, probcols[rownames(TAX2),])
+### MANY ASVs have NA, these all occur in only one sample. I will not remove them, because frankly we can be quite sure they are no contaminants
+# Crude comparison of frequency and prevalence contaminant assignment
+table(probcols$prob.f<0.1, probcols$prob.c<0.1)
+# Augment with prevalence groups and Abundance column
+physeq_16S_prev <- transform_sample_counts(physeq_16S_full, function(x) ifelse(x>0, 1, 0))
+TAX2$TAXprev <- taxa_sums(physeq_16S_prev)[rownames(TAX2)] # Add prevalences
+TAX2$Prevalence <- cut(TAX2$TAXprev, c(0, 2, 5, 10, 9999), labels=c("2", "3-5", "6-10", "11+"))
+
+TAXann <- rbind(cbind(TAX2, Score=TAX2$prob.f, Method="Frequency"),
+                cbind(TAX2, Score=TAX2$prob.p, Method="Prevalence"),
+                cbind(TAX2, Score=TAX2$prob.c, Method="Combined"))
+
+TAXann$Method <- factor(TAXann$Method, levels=c('Frequency','Prevalence','Combined'))
+prevalencePalette <- c("2" = "#edf8e9", "3-5" = "#bae4b3", "6-10" = "#74c476", "11+" = "#238b45")
+
+
+
+TAXannTest <- subset(TAXann, Method != "Prevalence")
+#figure 2b
+histo <- ggplot(TAXann, aes(x=Score, fill=Prevalence))
+
+histo <- histo + geom_histogram() + labs(x = 'decontam Score', y='Number ASVs') + 
+  facet_wrap(~Method, nrow=1) +
+  #http://colorbrewer2.org/#type=sequential&scheme=BuGn&n=4
+  scale_fill_manual(values=prevalencePalette) +
+  scale_y_sqrt()+
+ # theme(axis.text.x = element_text(colour="grey20",size=10,angle=0,
+ #                                   hjust=.5,vjust=.5,face="plain"),
+ #       axis.text.y = element_text(colour="grey20",size=10,angle=0,
+ #                                  hjust=1,vjust=0,face="plain"),
+ #       axis.title.x = element_text(colour="grey20",size=15,angle=0,
+ #                                   hjust=.5,vjust=0,face="plain"),
+ #       axis.title.y = element_text(colour="grey20",size=15,angle=90,
+ #                                   hjust=.5,vjust=.5,face="plain"),
+ #       strip.text.x = element_text(size = 15, angle = 0),
+ #       legend.title = element_text(size = 15, angle = 0),
+ #       legend.text = element_text(size = 10, angle = 0)) +
+  theme(legend.position = "bottom")
+histo
+ggsave("./Decontam/16S_histograms.png",width = 15, height =30,
+units = "in", dpi = 600 )
+```
+
+```{r}
+# Make phyloseq object of presence-absence in negative controls and true samples
+ps.pa <- transform_sample_counts(physeq_16S_full, function(abund) 1*(abund>0))
+ps.pa.neg <- prune_samples(ps.pa@sam_data$sample_control == "neg_control", ps.pa)
+ps.pa.pos <- prune_samples(sample_data(ps.pa)$sample_control == "real_sample", ps.pa)
+# Make data.frame of prevalence in positive and negative samples
+df.pa <- data.frame(pa.pos=taxa_sums(ps.pa.pos), pa.neg=taxa_sums(ps.pa.neg),
+                      contaminant=contamdf.prev$contaminant)
+ggplot(data=df.pa, aes(x=pa.neg, y=pa.pos, color=contaminant)) + geom_point() +
+  xlab("Prevalence (Negative Controls)") + ylab("Prevalence (True Samples)")
+ps.noncontam <- prune_taxa(!occ$contaminant, physeq_16S_full)
+ps.noncontam
+```
+
+```{r}
+#Remove Mitochondria, Chloroplast, and unnecessary taxons 
+
+physeq_bacterial_only <- subset_taxa(ps.noncontam, Kingdom == "Bacteria")
+physeq_bacterial_only <- prune_samples(sample_data(physeq_bacterial_only)$sample_control == "real_sample", physeq_bacterial_only)
+physeq_bacterial_only
+
+
+```
+
+```{r}
+#save.image("./6.S16_contamination.RData")
+rm(list=setdiff(ls(), "physeq_bacterial_only"))
+```
+
+## 6.1 subsetting phyloseq
+
+```{r}
+metadata=read.csv("G:/My Drive/CityDeal/Metadata/Metadata_per_sample.csv", row.names=1)
+# In my case the metadata has multiple experiments in there. Here you could filter them on column
+  metadata <- metadata[metadata$experiment=="CityDeal",]
+  metadata <- metadata[!grepl("^Lin", rownames(metadata)),]
+  metadata <- metadata[!grepl("^Gras", rownames(metadata)),]
+  metadata <- subset(metadata, Sample_or_Control != "Control")
+ #metadata <- metadata[rownames(metadata) != "T1A2B.C", ]<- "T1A2B"
+  metadata <- metadata[rownames(metadata) != "T1A2B.B", ]
+  metadata <- metadata[rownames(metadata) != "T1A2B.A",] 
+# The filtering is now complete. Some of the metadata has to be translated though
+metadata$topology <- gsub("Weg_bomen", "Street_with_trees", metadata$topology)
+metadata$topology <- gsub("Stoep_bomen", "Sidewalk_with_trees", metadata$topology)
+metadata$topology <- gsub("Stoep_geenbomen", "Sidewalk_without_trees", metadata$topology)
+metadata$topology <- gsub("Weg_geenbomen", "Street_without_trees", metadata$topology)
+metadata$topology <- gsub("Boomspiegel", "Treepit", metadata$topology)
+
+## Add to phyloseq
+META <- as.matrix(metadata)
+META=sample_data(metadata)
+sam_data(physeq_bacterial_only) <- META
+rownames(physeq_bacterial_only@sam_data["T1A2B.C",]) <- "T1A2B"
+physeq_bacterial_only
+```
+
+```{r}
+save.image("./6.1.S16_phyloseq_citydeal")
+rm(list=setdiff(ls(), "physeq_bacterial_only"))
+```
+
+## 7. Rarefaction 16S
+
+```{r}
+sequencing_depth <- as.data.frame(sample_sums(physeq_bacterial_only))
+
+
+
+write.csv(sequencing_depth, "G:/My Drive/CityDeal/Data_analysis_after_review/16Ssequencing_depth_raw.csv")
+# rarefy your dataset to lowest sequencing length or a custom number, 711 should be kept constant:
+phy_rare <- subset_samples(physeq_bacterial_only, sample_sums(physeq_bacterial_only)>=40000)
+phy_rare <- rarefy_even_depth(phy_rare,rngseed = 711, replace = F, trimOTUs = TRUE, 	verbose = F)
+phy_rare
+colSums(phy_rare@otu_table)
+
+
+# Sample names before rarefaction
+lost_samples <- setdiff(rownames(sample_data(physeq_bacterial_only)),rownames(sample_data(phy_rare)))
+lost_samples
+colSums(otu_table(phy_rare))
+
+```
+
+```{r}
+#save.image("./7.S16_Rarefaction.RData")
+rm(list=setdiff(ls(), c("physeq_bacterial_only", "phy_rare")))
+```
+
+### Supplemental figure
+
+```{r}
+## ITS rarefaction Curfe unrarefied
+rarefaction_curve_16S <- ggrare(physeq_bacterial_only, step =2000, color = "topology", se = F)
+
+rarefaction_curve_16S <- rarefaction_curve_16S + mytheme + 
+  scale_color_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECA1')) +
+  labs( 
+    x ="Number of reads",
+    y ="Total ASVs"
+    )
+rarefaction_curve_16S
+ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_16S_raw.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+## ITS rarefaction curve after rarefaction
+rarefaction_curve_16S_RF44000 <- ggrare(phy_rare, step = 1000, color = "topology", se = F)
+
+rarefaction_curve_16S_RF44000 <- rarefaction_curve_16S_RF44000 + mytheme + 
+  scale_color_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECA1')) +
+  labs( 
+    x ="Number of reads",
+    y ="Total ASVs"
+    )
+rarefaction_curve_16S_RF44000
+ggsave("G:/My Drive/CityDeal/Figures/Rarefaction_16S_RF42363.png.png",width = 15, height = 10, units = "in", dpi = 600)
+
+```
+
+```{r}
+save.image("./7.S16_Rarefaction.RData")
+rm(list=setdiff(ls(), c("physeq_bacterial_only","phy_rare","mytheme")))
+```
+
+## 8. Bacterial alpha
+
+```{r}
+## Rarefied; add richness parameters
+Richnes_parameters_rar <- estimate_richness(phy_rare, measures=c("Observed", "InvSimpson", "Shannon", "Chao1"))
+
+enriched_meta <- merge(as.data.frame(phy_rare@sam_data), Richnes_parameters_rar, by = "row.names", all.x = TRUE)
+# And add groups (city-topology)
+enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
+write.csv(enriched_meta, "G:/My Drive/CityDeal/Data_analysis_after_review/16S_enriched_meta_rarefied.csv")
+#enriched_meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/16S_enriched_meta_rarefied.csv", row.names = 1)
+
+phy_rare@sam_data <- sample_data(enriched_meta)
+
+enriched_meta$topology = factor(enriched_meta$topology, levels = c("Tree pit","sidewalk with trees","street with trees", "sidewalk without trees", "street without trees"))
+
+enriched_meta = enriched_meta[order(enriched_meta$topology), ]
+head(enriched_meta)
+richness_all_c <- ggplot(data = enriched_meta,
+                         aes(x=topology, y = Observed, fill=topology))+
+  geom_boxplot(lwd=1.5)+
+  #facet_grid(.~city, scales="free") + # For supplemental
+  expand_limits(y=0:1000) +
+  scale_y_continuous(breaks=seq(0,9000, by=2000)) +
+  labs(x="City", y="Richness ASVs", title="ASV Richness 16S rarefied")+
+  #theme_bw()+
+  scale_fill_manual(values=c('#FEECC8','#FFABAB','#DBFFD6', '#ACE7FF', '#ECD4FF')) +
+  mytheme +
+   theme(text = element_text(size=12),
+         legend.text = element_text(size=12),
+         axis.title=element_text(size=14),
+         axis.text.x = element_text(size=12, angle = 90, hjust = 0.5, vjust=0.5),
+         axis.text.y = element_text(size=12))
+        #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+richness_all_c
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/16S_alpha_Div_figure_2.png", width = 15, height =10,
+units = "in", dpi = 600)
+
+## For each city and topology apart
+stats_rarefied_topo_city <- compare_variables_function(enriched_meta, "topology", "city", "Observed")
+stats_rarefied_city_topo <- compare_variables_function(enriched_meta, "city", "topology", "Observed")
+stats_rarefied_topo_city
+
+#and for the total dataset
+normality_rar <- shapiro.test(enriched_meta$Observed)
+homogeinity_rar <- bartlett.test(enriched_meta$Observed, phy_rare@sam_data$group) 
+# Check, we'll need Kruskall wallis
+
+kruskal_rar <- kruskal.test(enriched_meta$Observed ~ enriched_meta$topology)
+wilcox_rar <- pairwise.wilcox.test(enriched_meta$Observed, enriched_meta$topology, p.adjust.method = "BH")
+
+kruskal_rar
+wilcox_rar
+```
+
+There are no differences in alpha diversity between cities and/or typologies, Amserdam is slightly higher than Dordrecht
+
+### unrarefied sensitivity check
+
+```{r}
+##Little fix
+#sample_names(physeq_bacterial_only) <- sample_data(physeq_bacterial_only)$Row.names
+
+## Rarefied; add richness parameters
+Richnes_parameters <- estimate_richness(physeq_bacterial_only, measures=c("Observed", "InvSimpson", "Shannon", "Chao1"))
+
+
+
+enriched_meta <- merge(as.data.frame(physeq_bacterial_only@sam_data), Richnes_parameters, by = "row.names", all.x = TRUE)
+rownames(enriched_meta) <- enriched_meta$Row.names
+# And add groups (city-topology)
+enriched_meta$group <- paste(enriched_meta$topology, enriched_meta$city)
+
+#write.csv(t(enriched_meta), "./16S_metadata_unrarefied.csv")
+enriched_meta <- read.csv("./16S_metadata_unrarefied.csv")
+
+
+enriched_meta$topology = factor(enriched_meta$topology, levels = c("Tree pit","sidewalk with trees","street with trees", "sidewalk without trees", "street without trees"))
+
+enriched_meta = enriched_meta[order(enriched_meta$topology), ]
+head(enriched_meta)
+richness_all_c_unrar <- ggplot(data = enriched_meta,
+                         aes(x=topology, y = Observed, fill=topology))+
+  geom_boxplot(lwd=0.1)+
+  #facet_grid(.~city, scales="free") +
+  expand_limits(y=0:1000) +
+  scale_y_continuous(breaks=seq(0,6000, by=1000)) +
+  labs(x="City", y="Richness ASVs", title="ASV Richness ITS")+
+  #theme_bw()+
+  scale_fill_manual(values=c('#FEECC8','#FFABAB','#DBFFD6', '#ACE7FF', '#ECD4FF')) +
+  mytheme +
+   theme(text = element_text(size=12),
+         legend.text = element_text(size=12),
+         axis.title=element_text(size=14),
+         axis.text.x = element_text(size=12, angle = 90, hjust = 0.5, vjust=0.5),
+         axis.text.y = element_text(size=12))
+        #panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+richness_all_c_unrar
+
+#ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/16S_Alpha_div_unrar_supp.png", width = 15, height =10,
+units = "in", dpi = 600)
+
+## For each city and topology apart
+stats_rarefied_topo_city_unrar <- compare_variables_function(enriched_meta, "topology", "city", "Observed")
+stats_rarefied_city_topo_unrar <- compare_variables_function(enriched_meta, "city", "topology", "Observed")
+stats_rarefied_city_topo_unrar
+
+#and for the total dataset
+normality_unrar <- shapiro.test(enriched_meta$Observed)
+homogeinity_unrar <- bartlett.test(enriched_meta$Observed, physeq_bacterial_only@sam_data$group) 
+# Check, we'll need Kruskall wallis
+
+kruskal_umrar <- kruskal.test(enriched_meta$Observed ~ enriched_meta$topology)
+wilcox_umrar <- pairwise.wilcox.test(enriched_meta$Observed, enriched_meta$topology, p.adjust.method = "BH")
+
+kruskal_umrar
+wilcox_umrar
+```
+
+Unrarefied shows not patterns either.
+
+```{r}
+#save.image("./8.S16_Alpha_diversity.RData")
+rm(list=setdiff(ls(), c("physeq_bacterial_only","phy_rare","mytheme")))
+```
+
+## 8.1 Taxonomic analysis
+
+```{r}
+## Make presence absence phyloseq
+
+## little fixup
+#rownames(physeq_fungal_only@sam_data) <- physeq_fungal_only@sam_data$Row.names
+
+physeq_bacterial_only_pres_abs <- transform_sample_counts(physeq_bacterial_only, function(abund) 1*(abund>0))
+physeq_bacterial_only_pres_abs@sam_data$topology = factor(physeq_bacterial_only_pres_abs@sam_data$topology, levels = c("Tree pit","sidewalk with trees","street with trees", "sidewalk without trees", "street without trees"))
+physeq_bacterial_only_pres_abs@sam_data = physeq_bacterial_only_pres_abs@sam_data[order(physeq_bacterial_only_pres_abs@sam_data$topology), ]
+physeq_bacterial_only_pres_abs@sam_data
+```
+
+```{r}
+barplot_16S_taxa <- plot_grouped_taxa_bar(physeq_bacterial_only_pres_abs, merge_var = "topology", level ="Class", higher_level = "Phylum", threshold = 3.5, palette = "Set3")
+barplot_16S_taxa
+
+barplot_16S_rare <- plot_rare_phyla_bar(physeq_bacterial_only_pres_abs, merge_var = "topology",  higher_level = "Phylum", threshold = 3.5, palette = "Set3")
+barplot_16S_rare
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Taxonomy_fig3_low_orders.png", width = 15, height =10,units = "in", dpi = 600)
+
+```
+
+```{r}
+#save.image("./3.1_ITS_Functional_analysis.RData")
+
+```
+
+### Statistics
+
+Ancom-bc is a good method to do the statistics behind this. It is compositional aware and does a (Sampling/pcr) bias correction. Input is normal phyloseq
+
+```{r}
+run_deseq2_phyloseq <- function(
+  physeq,
+  tax_rank = "Order",          # e.g. "Phylum", "Genus", or NULL for ASV
+  design_formula = ~ city + topology,
+  size_factor_type = "poscounts"
+) {
+
+  # 1. Aggregate if taxonomic rank is given
+  if (!is.null(tax_rank)) {
+    stopifnot(tax_rank %in% rank_names(physeq))
+    physeq <- tax_glom(physeq, taxrank = tax_rank)
+  }
+
+  # 2. Remove zero-count taxa
+  physeq <- prune_taxa(taxa_sums(physeq) > 0, physeq)
+
+  # 3. Convert to DESeq2
+  dds <- phyloseq_to_deseq2(physeq, design_formula)
+
+  # 4. Estimate size factors (robust to zeros)
+  dds <- estimateSizeFactors(dds, type = size_factor_type)
+
+  # 5. Run DESeq2
+  dds <- DESeq(dds)
+
+  return(dds)
+}
+
+```
+
+```{r}
+dds_phylum <- run_deseq2_phyloseq(
+  physeq_bacterial_only,
+  tax_rank = "Phylum",
+  design_formula = ~ city + topology
+)
+levels(colData(dds_phylum)$topology)
+topos <- levels(colData(dds_phylum)$topology)
+pairs <- combn(topos, 2, simplify = FALSE)
+all_contrasts <- lapply(pairs, function(p) {
+
+  res <- results(
+    dds_phylum,
+    contrast = c("topology", p[1], p[2]),
+    alpha = 0.05
+  )
+
+  as.data.frame(res) %>%
+    rownames_to_column("Phylum") %>%
+    mutate(
+      contrast = paste(p[1], "vs", p[2])
+    )
+})
+
+all_contrasts_df <- bind_rows(all_contrasts)
+
+all_contrasts_df <- all_contrasts_df %>%
+  mutate(padj_global = p.adjust(pvalue, method = "fdr"))
+all_contrasts_df$ASV <- all_contrasts_df$Phylum
+```
+
+```{r}
+## Atach taxonomy\
+rep_ASVs <- all_contrasts_df$ASV
+Phyla <- as.data.frame(physeq_bacterial_only@tax_table)
+all_contrasts_df$Order <- Phyla[all_contrasts_df$ASV, "Phylum"]
+write.csv(all_contrasts_df, "./8.1_16S_taxonomy_analysis_statistics_phylum.csv")
+```
+
+fj
+
+```{r}
+contrasts_sig_table <- all_contrasts_df %>%
+  separate(contrast, into = c("g1", "g2"), sep = " vs ") %>%
+  mutate(
+    sig = padj_global < 0.05,
+    direction = case_when(
+      log2FoldChange > 0 ~ 1,
+      log2FoldChange < 0 ~ -1,
+      TRUE ~ 0
+    )
+  )
+
+
+scores_contrasts <- contrasts_sig_table %>%
+  mutate(
+    g1_score = ifelse(sig, direction, 0),
+    g2_score = ifelse(sig, -direction, 0)
+  ) %>%
+  select(Phylum, g1, g2, g1_score, g2_score) %>%
+  pivot_longer(
+    cols = c(g1, g2),
+    names_to = "which",
+    values_to = "group"
+  ) %>%
+  mutate(score = ifelse(which == "g1", g1_score, g2_score)) %>%
+  group_by(Phylum, group) %>%
+  summarise(score = sum(score), .groups = "drop")
+
+
+nonsig_pairs <- contrasts_sig_table %>%
+  filter(!sig) %>%
+  select(Phylum, g1, g2)
+
+
+build_pattern <- function(phylum) {
+  
+  s <- scores_contrasts%>% filter(Phylum == phylum) %>% arrange(desc(score))
+  ns <- nonsig_pairs %>% filter(Phylum == phylum)
+
+  groups <- list()
+  
+  for (g in s$group) {
+    placed <- FALSE
+    
+    for (i in seq_along(groups)) {
+      ref <- groups[[i]][1]
+      
+      tied <- ns %>%
+        filter((g1 == g & g2 == ref) | (g1 == ref & g2 == g)) %>%
+        nrow() > 0
+      
+      if (tied) {
+        groups[[i]] <- c(groups[[i]], g)
+        placed <- TRUE
+        break
+      }
+    }
+    
+    if (!placed) groups[[length(groups) + 1]] <- g
+  }
+  
+  paste(
+    sapply(groups, function(x) paste(x, collapse = " = ")),
+    collapse = " > "
+  )
+}
+
+
+patterns_equal <- scores_contrasts %>%
+  distinct(Phylum) %>%
+  rowwise() %>%
+  mutate(pattern = build_pattern(Phylum)) %>%
+  ungroup()
+
+write.csv(patterns_equal, "./16S_taxonomy_statistical_summary_patterns.csv")
+```
+
+```{r}
+save.image("./8.1.S16_Taxonomy.RData")
+```
+
+New visualisation
+
+```{r}
+ps_norm <- transform_sample_counts(
+  ps_counts,
+  function(x) x / phyloseq::sample_sums(ps_counts)
+)
+```
+
+## 9. PCoA - Beta Div
+
+### CLR
+
+```{r}
+
+## Little patch-up
+#sample_names(physeq_bacterial_only)<- sample_data(physeq_bacterial_only)$Row.names
+
+## Perform CLR transformation
+ps_clr_S16 <- transform(physeq_bacterial_only, "clr")
+
+ps_clr_S16
+
+dist_aitch <- distance(ps_clr_S16, method = "euclidean")
+ord <- ordinate(ps_clr_S16, method = "PCoA", distance = "euclidean")
+str(ord)
+plot_ordination(ps_clr_S16, ord, color = "city", shape = "topology")
+
+## TRY
+clr_mat_16S <- t(as(otu_table(ps_clr_S16), "matrix"))
+
+pca_16S<- prcomp(clr_mat_16S, scale. = FALSE)
+
+plot(pca_16S$x[,1], pca_16S$x[,2])
+
+df_16S <- data.frame(
+  pca_16S$x[,1:2],
+  sample_data(ps_clr_S16)
+)
+
+library(ggplot2)
+ggplot(df_16S, aes(PC1, PC2, color = city, shape = topology)) +
+  geom_point(size = 3)
+
+
+# Add metadata
+ meta <- as.data.frame(sample_data(ps_clr_S16))
+ meta$SampleID <- rownames(meta)
+ meta$Streetpair <- substr(meta$SampleID, 0, 3)
+ meta$Streetpair <- gsub("o","", meta$Streetpair)
+ meta$Streetpair <- substr(meta$Streetpair, 0, 2)
+# meta <- t(meta)
+#  write.csv(t(meta), "G:/My Drive/CityDeal/Data_analysis_after_review/S16_metadata_unrarefied.csv")
+meta <- as.data.frame(meta)
+
+# Extract sample scores
+scores <- as.data.frame(ord$vectors)
+scores$SampleID <- rownames(scores)
+averages <- left_join(scores, meta, by = "SampleID")
+
+df_sum <- averages %>%
+  group_by(topology, city) %>%
+  summarise(
+    Axis1_mean = mean(Axis.1),
+    Axis2_mean = mean(Axis.2),
+    Axis3_mean = mean(Axis.3),
+    Axis4_mean = mean(Axis.4),
+    Axis1_se = sd(Axis.1) / sqrt(n()),
+    Axis2_se = sd(Axis.2) / sqrt(n()),
+    Axis3_se = sd(Axis.3) / sqrt(n()),
+    Axis4_se = sd(Axis.4) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+
+ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
+                   fill = topology, shape = city)) +
+  geom_errorbar(
+    aes(ymin = Axis2_mean - Axis2_se,
+        ymax = Axis2_mean + Axis2_se),
+    width = 0,
+    linewidth = 1
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis1_mean - Axis1_se,
+        xmax = Axis1_mean + Axis1_se),
+    height = 0,
+    linewidth = 1
+  ) +
+    geom_point(size = 5, stroke = 1.5) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA1: ", round(ord$values$Relative_eig[1] * 100, 2), "%", sep=""),
+    y=paste("PCoA2: ", round(ord$values$Relative_eig[2] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC1_PC2.png",width = 15, height = 10, units = "in", dpi = 600)
+
+## Second and Third axis
+ggplot(df_sum, aes(Axis2_mean, Axis3_mean,
+                   fill = topology, shape = city)) +
+  geom_errorbar(
+    aes(ymin = Axis3_mean - Axis3_se,
+        ymax = Axis3_mean + Axis3_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis2_mean - Axis2_se,
+        xmax = Axis2_mean + Axis2_se),
+    height = 0,
+    linewidth =1 
+  ) +
+  geom_point(size = 5, stroke = 1.5) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA2: ", round(ord$values$Relative_eig[2] * 100, 2), "%", sep=""),
+    y=paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC2_PC3.png",width = 15, height = 10, units = "in", dpi = 600)
+
+## Third and Fourth axis
+ggplot(df_sum, aes(Axis3_mean, Axis4_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis4_mean - Axis4_se,
+        ymax = Axis4_mean + Axis4_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis3_mean - Axis3_se,
+        xmax = Axis3_mean + Axis3_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA3: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep=""),
+    y=paste("PCoA4: ", round(ord$values$Relative_eig[4] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+
+ggsave("G:/My Drive/CityDeal/Data_analysis_after_review/S16_Eucledian_distance_PC3_PC4.png",width = 15, height = 10, units= "in", dpi = 600)
+```
+
+```{r}
+## Stupid fix
+# meta <- t(meta)
+# write.csv(t(meta), "./16S_metadata_unrarefied.csv")
+meta <- read.csv("./16S_metadata_unrarefied.csv", row.names = 1)
+
+perm_typology_pcity <- adonis2(as.dist(dist_aitch) ~  city, data=meta )
+perm_typology_pcity
+bd_topo <- betadisper(dist_aitch, meta$city)
+aov(bd_topo)
+
+```
+
+Statistics by clr
+
+```{r}
+# always difficulties with Phyloseq sample info to dataframe, fastest way is to just load the metadata csv. 
+#meta <- read.csv("G:/My Drive/CityDeal/Data_analysis_after_review/S16_metadata_unrarefied.csv", row.names = 1)
+# PERMANOVA for individual variables
+adonis_city <- adonis2(dist_aitch ~ city, data=as.data.frame(meta))
+adonis_city
+adonis_topology <- adonis2(dist_aitch ~ topology, strata = meta$Streetpair, data= meta)
+adonis_topology
+adonis_streetname <- adonis2(dist_aitch ~ streetname, data= meta)
+adonis_streetname
+adonis_covering <- adonis2(dist_aitch ~ covering, data= meta)
+adonis_covering
+# adonis_typestraat <- adonis2(dist_aitch ~ type_straat, data= metadata_bact)
+# adonis_covering
+#adonis_covertree <- adonis2(dist_aitch ~ covertree, data = metadata_fungi)
+#adonis_covertree
+##Permanova assumes equal dispersion amongst groups
+beta_disp <- betadisper(dist_aitch, meta$topology)
+anova(beta_disp)  # Tests if dispersion is significantly different
+permutest(beta_disp)  # Permutation test for dispersion
+
+# PERMANOVA for interaction (combination)
+adonis_combination <- adonis2(dist_aitch ~ topology * city, data =meta)
+
+PairPermS16 <- pairwise.perm.manova(dist_aitch, meta$city, test="Pillai", nperm = 999, p.method = "fdr", F = TRUE, R2 = TRUE)
+PairPermS16
+PairPermS16$F.value
+
+pairpermits2 <- pairwise.perm.manova(dist_aitch, meta$topology, test="Pillai", nperm = 999, p.method = "fdr", F = TRUE, R2 = TRUE)
+pairpermits2
+pairpermits2$F.value
+
+street_pairperm <- pairwise.perm.manova(dist_aitch, meta$street, test = "Pillai", nperm =999, p.method = "fdr",F=T,R2=T)
+# 
+# pairperm_covertree <- pairwise.perm.manova(dist_aitch, metadata_fungi$covertree, test = "pillai", nperm =999, p.method ="fdr", F=T, R2=T)
+# pairperm_covertree$R2.value
+
+## For pairwase manova:
+# higher F-value means that between-group variation is alrger relative to the within group variation
+# This generally means a stronger effect of the grouping variable
+# Display results
+
+# Flatten and bind rows
+combined_results <- bind_rows(
+  data.frame(Test = "Adonis_topology", adonis_topology),
+  data.frame(Test="Pairwise_permanova_topology", pairpermits2$p.value),
+  data.frame(Test = "Pairwise_topology_R2", pairpermits2$R2.value),
+  data.frame(Test = "Adonis_city", adonis_city),
+  data.frame(Test = "Pairwise_permanova_city", PairPermS16$p.value),
+  data.frame(Test = "R2_value_city", PairPermS16$R2.value),
+  data.frame(Test = "Adonis_streetname", adonis_streetname),
+  data.frame(Test = "Adonis_covering", adonis_covering),
+  #data.frame(Test = "Adonis_typestreet", adonis_typestraat),
+  #data.frame(Test = "Adonis_covertree", adonis_covertree),
+  #data.frame(Test = "Pairwise_covertree", pairperm_covertree$p.value),
+  #data.frame(Test = "R2_covertree", pairperm_covertree$R2.value),
+  .id = "Source"
+)
+street_df <- bind_rows(
+  data.frame(Test="p-value", street_pairperm$p.value),
+  data.frame(Test="R2_values", street_pairperm$R2.value)
+)
+
+write.csv(combined_results, "G:/My Drive/CityDeal/Data_analysis_after_review/S16_PCOA_statistical_summary_aitch.csv")
+```
+
+```{r}
+save.image("./9.S16-BetaDiversiy.RData")
+
+```
+
+```{r}
+beta_disp <- betadisper(dist_aitch, meta$city)
+anova(beta_disp)  # Tests if dispersion is significantly different
+permutest(beta_disp)  # Permutation test for dispersion
+permutest(beta_disp, pairwise = TRUE)
+
+```
+
+### Rarefied - Bray
+
+```{r}
+# Small fixups in data structure
+meta <- read.csv("./16S_metadata_rarefied.csv")
+meta$Sample
+ meta$X <- NULL
+ rownames(meta) <- meta$Row.names
+
+S16_ordin_bray <- ordinate(phy_rare, method = "PCoA", distance = "bray")
+
+df_bray <- merge(S16_ordin_bray$vectors[,1:2], meta, by = "row.names")
+row.names(df_bray) <- df_bray$Row.names
+df_bray <- df_bray[, -1] 
+
+# Extract sample scores
+scores <- as.data.frame(S16_ordin_bray$vectors)
+scores$Row.names <- rownames(scores)
+averages <- left_join(scores, meta, by = "Row.names")
+
+df_sum <- averages %>%
+  group_by(topology, city) %>%
+  summarise(
+    Axis1_mean = mean(Axis.1),
+    Axis2_mean = mean(Axis.2),
+    Axis3_mean = mean(Axis.3),
+    Axis4_mean = mean(Axis.4),
+    Axis1_se = sd(Axis.1) / sqrt(n()),
+    Axis2_se = sd(Axis.2) / sqrt(n()),
+    Axis3_se = sd(Axis.3) / sqrt(n()),
+    Axis4_se = sd(Axis.4) / sqrt(n()),
+    n = n(),
+    .groups = "drop"
+  )
+
+
+pcoa_bray_all<-ggplot(df_sum, aes(Axis1_mean, Axis2_mean,
+                   fill = topology, shape = city)) +
+  geom_point(size = 4) +
+  geom_errorbar(
+    aes(ymin = Axis2_mean - Axis2_se,
+        ymax = Axis2_mean + Axis2_se),
+    width = 0
+  ) +
+  geom_errorbarh(
+    aes(xmin = Axis1_mean - Axis1_se,
+        xmax = Axis1_mean + Axis1_se),
+    height = 0
+  ) +
+  mytheme +
+  scale_fill_manual(values=c('#FFABAB', '#ACE7FF', '#DBFFD6', '#ECD4FF', '#FEECC8')) +
+  scale_shape_manual(values=c(21,22,23,24,25)) +
+  labs(
+    x = paste("PCoA1: ", round(ord$values$Relative_eig[3] * 100, 2), "%", sep=""),
+    y=paste("PCoA2: ", round(ord$values$Relative_eig[4] * 100, 2), "%", sep="")) +
+  guides(fill=guide_legend(override.aes=list(shape=21)))+
+  mytheme
+
+pcoa_bray_all
+
+ggsave("./S16_bray.png",width = 15, height = 10, units = "in", dpi = 600)
+
+
+
+
+bray_distance <- phyloseq::distance(phy_rare, method = "bray")
+
+
+adonis2(bray_distance ~ city + topology, strata = meta$street, data = meta, by = "margin")
+pairwise.perm.manova(bray_distance, meta$Plate_number, test="Pillai", nperm = 999, p.method = "fdr", F = TRUE, R2 = TRUE)
+adonis2(bray_distance ~ city, strata = meta$topology, data = meta)
+
+
+bd_topo <- betadisper(bray_distance, meta$topology,)
+anova(bd_topo)
+plot(bd_topo)
+```
+
+# Functional heatmaps
+
+### 16s
+
+```{r}
+library(microeco)
+library(file2meco)
+library(vegan)
+library(microbiome)
+
+# Loading the FAPROTAX database is more complex. To calculate annotation, we first transform the phyloseq to the meco object
+Meco_16S_Rare   <- phyloseq2meco(physeq_filtered_16s)
+Meco_16S_Func   <- trans_func$new(dataset =Meco_16S_Rare)
+
+
+# Calculate the FAPROTAX 1/0 matrix and extraction 
+Meco_16S_Func$cal_spe_func(prok_database = "FAPROTAX")
+Func16S         <- as.data.frame(Meco_16S_Func$res_spe_func)
+sum(rowSums(Func16S, na.rm = F) == 0)
+sum(rowSums(Func16S, na.rm = F) != 0)
+sum(rowSums(Func16S, na.rm = F) != 0)/length(rownames(Func16S))
+## 26688 ASV are annotated which is 17%
+
+# Note that I will continue with this microeco package, as translating this back into phyloseq is not ideal
+```
+
+#### Bar Graph/Heat Maps
+
+```{r}
+# Calculating percentage coverage and making a heatmap
+Meco_16S_Func$cal_spe_func_perc(abundance_weighted = TRUE, perc = TRUE, dec = 8)
+Func16SPerc     <- as.data.frame(Meco_16S_Func$res_spe_func_perc)
+
+# creating heatmap x axis order from Ordination (same as phyloseq heatmap)
+## extracting ordination coordinates and calculating radial theta
+Ord16STest      <- Meco_16S_Rare$clone()
+Ord16STest$cal_betadiv(method = "jaccard")
+Ord16SBeta_group      <- trans_beta$new(dataset = Ord16STest, group = "group", measure = "jaccard")
+Ord16SBeta$cal_ordination(method = "PCoA")
+Scores          <- scores(Ord16SBeta$res_ordination, choices = c(1,2), display = "sites")
+Order16S        <- Ord16STest$sample_names()[order(radial_theta(Scores))]
+
+rm(Ord16STest, Ord16SBeta, Scores)
+
+# Creating heatmap
+Meco_16S_Func$plot_spe_func_perc(add_facet = TRUE,
+                                 order_x = Order16S)+
+    scale_fill_gradient2(low = "#FF0000", mid ="#CCFFFF", high = "#001A1A" ,midpoint = 0.00001, na.value = "#FF0000")+
+    labs(title = "Heatmap of functional diversity (16S data)")
+
+
+ggsave(paste(datafolder,"Functional_analysis_ASV/16S_Func_Heat.png"), device = png, width = 2000, height = 1200, units = "px", dpi = 144, limitsize = FALSE)
+ggsave(paste(datafolder,"Functional_analysis_ASV/ASV_16S_Func_Heat2.png"), device = png, width = 6000, height = 1200, units = "px", dpi = 144, limitsize = FALSE)
+#Note the one sample in the middle that is different is B077; Higher levels of chloroplasts, photoautotrophy and also  human associated: maybe Biofilm? Algae? Moss?
+
+# Merged By topology
+Meco_16S_Funcx  <- Meco_16S_Rare$merge_samples("topology")
+
+Meco_16S_Funcx  <- trans_func$new(Meco_16S_Funcx)
+Meco_16S_Funcx$cal_spe_func(prok_database = "FAPROTAX")
+Func16Sx         <- as.data.frame(Meco_16S_Funcx$res_spe_func)
+
+Meco_16S_Funcx$cal_spe_func_perc(abundance_weighted = TRUE, perc = FALSE, dec = 8)
+Func16SxPerc     <- as.data.frame(Meco_16S_Funcx$res_spe_func_perc)
+
+# creating order from chaos
+Ord16STest      <- Meco_16S_Rare$clone()
+Ord16STest      <- Ord16STest$merge_samples("topology")
+Ord16STest$cal_betadiv(method = "jaccard")
+Ord16SBeta      <- trans_beta$new(dataset = Ord16STest, measure = "jaccard")
+Ord16SBeta$cal_ordination(method = "PCoA")
+Scores          <- scores(Ord16SBeta$res_ordination, choices = c(1,2), display = "sites")
+Order16SGroup   <- Ord16STest$sample_names()[order(radial_theta(Scores))]
+
+rm(Ord16STest, Ord16SBeta, Scores)
+
+# plot
+
+Meco_16S_Funcx$plot_spe_func_perc(add_facet = TRUE,
+                                 order_x = Order16SGroup) +
+    scale_fill_gradient2(low = "#FF0000", mid = "#CCFFFF", high = "#001A1A",midpoint = 0.00001, na.value = "#FF0000")+
+    labs(title = "Heatmap of functional diversity grouped by topology (16S data)")
+
+write.csv(Func16SxPerc, paste(datafolder,"Functional_analysis_ASV/ASV_16S_Func_topology.csv")
+ggsave(paste(datafolder,"Functional_analysis_ASV/ASV_16S_Func_topology.png"), device = png, width = 2000, height = 1200, units = "px", dpi = 144, limitsize = FALSE)
+
+#Meco_16S_Rare$sample_table$group <- paste(Meco_16S_Rare$sample_table$city, #Meco_16S_Rare$sample_table$topology, sep = "_")
+
+# Merged By group
+Meco_16S_Funcx  <- Meco_16S_Rare$merge_samples("topology")
+
+Meco_16S_Funcx  <- trans_func$new(Meco_16S_Funcx)
+Meco_16S_Funcx$cal_spe_func(prok_database = "FAPROTAX")
+Func16Sx         <- as.data.frame(Meco_16S_Funcx$res_spe_func)
+
+Meco_16S_Funcx$cal_spe_func_perc(abundance_weighted = TRUE, perc = FALSE, dec = 8)
+Func16SxPerc     <- as.data.frame(Meco_16S_Funcx$res_spe_func_perc)
+
+# creating order from chaos
+Ord16STest      <- Meco_16S_Rare$clone()
+Ord16STest      <- Ord16STest$merge_samples("topology")
+Ord16STest$cal_betadiv(method = "jaccard")
+Ord16SBeta      <- trans_beta$new(dataset = Ord16STest, measure = "jaccard")
+Ord16SBeta$cal_ordination(method = "PCoA")
+Scores<- scores(Ord16SBeta$res_ordination, choices = c(1,2), display = "sites")
+Order16SGroup   <- Ord16STest$sample_names()[order(radial_theta(Scores))]
+
+rm(Ord16STest, Ord16SBeta, Scores)
+
+library(viridis)
+library(scales)
+# plot
+Meco_16S_Funcx$res_spe_func_perc_trans$value <- ifelse(Meco_16S_Funcx$res_spe_func_perc_trans$value==NA,0,Meco_16S_Funcx$res_spe_func_perc_trans$value)
+
+Meco_16S_Funcx$plot_spe_func_perc(add_facet = TRUE,
+                                 order_x = Order16SGroup) +
+    scale_fill_viridis_d(option = "viridis", na.value = "white")+
+    labs(title = "Heatmap of functional diversity grouped by city and topology (16S data)")
+
+Meco_16S_Funcx$plot_spe_func_perc(add_facet = TRUE,
+                                  order_x = Order16SGroup) +
+  scale_fill_viridis(
+    option = "viridis",
+    values = rescale(c(0, 0.002, 0.01, 0.3)),  # more detail in the low range
+    na.value = "white",
+    direction = -1                             # optional: reverse if needed
+  ) +
+  labs(title = "Heatmap of functional diversity grouped by city and topology (16S data)")
+
+bold_labels <- function(labels, to_bold) {
+  sapply(labels, function(label) {
+    if (label %in% to_bold) {
+      label <- paste0("*", label)
+      bquote(bold(.(label)))
+    } else {
+      label
+    }
+  })
+}
+rows_to_make_bold <- as.list(names(signif_functions))
+
+Meco_16S_Funcx$plot_spe_func_perc(add_facet = TRUE,
+                                  order_x = c("sidewalk with trees", "sidewalk without trees", "street with trees", "street without trees", "Tree pit")) +
+  scale_fill_viridis(
+  option = "viridis",
+  values = rescale(c(0, 0.002, 0.01, 0.3)),
+  breaks = c(0, 0.005, 0.01, 0.05, 0.1, 0.3),
+  labels = scales::label_percent(accuracy = 0.1),
+  na.value = "white",
+  direction = -1,
+  guide = guide_colorbar(barheight = 40, barwidth = 1)
+)+
+  scale_y_discrete(labels = bold_labels(colnames(Meco_16S_Funcx$res_spe_func), rows_to_make_bold)) +  
+  labs(title = "Heatmap of functional diversity grouped by city and topology (16S data)")
+
+
+
+
+  #write.csv(Func16SxPerc, paste(datafolder,"Functional_analysis_ASV/ASV_16S_Func_City_and_topology.csv")
+ggsave(paste(datafolder,"Functional_analysis_ASV/ASV_16S_Func_city_and_topology_viridis_test.png"), device = png, width = 2000, height = 2400, units = "px", dpi = 144, limitsize = FALSE)
+```
+
+#### Statistics
+
+```{r}
+
+library(rstatix)
+## We make a dataframe with metadata and functional data combined.
+func_table_with_meta <- cbind(Func16SPerc, as.data.frame(physeq_filtered_16s@sam_data))
+write.csv(func_table_with_meta ,paste(datafolder,"/Functional_analysis_ASV/test_functional_table_merged.csv")
+
+# Run Kruskal-Wallis test for each function, based on topology. KW because not all values are normally distributed and we should not combine tests.
+kw_results <- apply(func_table_with_meta[1:ncol(Func16SPerc)], 2, function(x) kruskal.test(x ~ func_table_with_meta$topology)$p.value)
+
+# Adjust p-values for multiple testing (Benjamini-Hochberg)
+kw_results_adj <- p.adjust(kw_results, method = "BH")
+
+# View top significant functions
+signif_functions <- sort(kw_results_adj[kw_results_adj < 0.05])
+names(signif_functions)
+str(names(signif_functions))
+func_table_signif <- func_table[,names(signif_functions)]
+
+
+
+# Practise to do all pairwise comps.
+# for (i in 1:length(names(func_table_signif))){
+#   name <- names(signif_functions)[i]
+#   pairwise_result <- pairwise_wilcox_test(
+#     data.frame(value = func_table_signif[,i], group = category),
+#     value ~ group,
+#     p.adjust.method = "BH"
+#     )
+#   pairwise_result_list[name]<- pairwise_result
+# }
+#   pairwise_result
+
+
+
+func_table_signif_merge <-  merge(func_table_signif,physeq_filtered_16s@sam_data,by="row.names",all.x=TRUE)
+rownames(func_table_signif_merge) <- func_table_signif_merge$Row.names
+func_table$Row.names <- NULL
+#One keeps giving an error, so I decided to just remove it.
+#names(signif_functions[56])
+results_list <- list()
+for (func in colnames(func_table_signif)) {
+  print(func)
+  # Perform pairwise test
+  test <- func_table_signif_merge %>%
+    dunn_test(as.formula(paste(func, "~ topology")), p.adjust.method = "BH") %>%
+    add_significance()
+  
+  # Add median direction info
+  median_vals <- func_table_signif_merge %>%
+    group_by(topology) %>%
+    summarise(med = median(.data[[func]], na.rm = TRUE))
+  
+  test <- test %>%
+    left_join(median_vals, by = c("group1" = "topology")) %>%
+    rename(med1 = med) %>%
+    left_join(median_vals, by = c("group2" = "topology")) %>%
+    rename(med2 = med) %>%
+    mutate(direction = case_when(
+      p.adj < 0.05 & med1 > med2 ~ paste(group1, ">", group2),
+      p.adj < 0.05 & med1 < med2 ~ paste(group1, "<", group2),
+      TRUE ~ "NS"
+    )) %>%
+    mutate(Function = func)
+  
+  results_list[[func]] <- test
+}
+
+# Combine all test results
+all_results <- bind_rows(results_list)
+
+write.csv(all_results, paste(datafolder,"/Functional_analysis_ASV/pairwise_comparison_functions_topology.csv")
+
+```
+
+### ITS
+
+```{r}
+# Having switched to Microeco for functional trait analysis, most of the ITS process has been commented out.
+
+# # FungalTraits
+# # extracting the taxtable from phyloseq (rarefied)
+# TAXITS <- as.data.frame(tax_table(ASV_ITS_Rare))
+# TAXITS1 <- TAXITS
+# 
+# # Adding guild annotation
+# TAXITS1$Genus <- gsub("g__", "", TAXITS1$Genus)
+# TAXITS1$Guild <- as.factor(Fungaltraits$guild_fg[match(TAXITS1$Genus, Fungaltraits$Genus)])
+# TAXITS1 <- TAXITS1[,c(8,1,2,3,4,5,6,7)]
+# # guild has 36 levels
+# 
+# #new phyloseq
+# TAXITS1 <- tax_table(as.matrix(TAXITS1))
+# ASV_ITS_Func1 <- phyloseq(otu_table(ASV_ITS_Rare),TAXITS1,Treetment)
+# rm(TAXITS1)
+
+library(file2meco)
+library(microeco)
+#Microeco. Note that these have a more recent database
+Meco_ITS_Rare   <- phyloseq2meco(physeq_fungal_only)
+Meco_ITS_Func   <- trans_func$new(Meco_ITS_Rare)
+Meco_ITS_Func$cal_spe_func(fungi_database = "FungalTraits")
+FuncITS         <- as.data.frame(Meco_ITS_Func$res_spe_func)
+sum(rowSums(FuncITS, na.rm = F) == 0)
+sum(rowSums(FuncITS, na.rm = F) != 0)
+sum(rowSums(FuncITS, na.rm = F) != 0)/length(rownames(FuncITS))
+# Coverage has improved to 37% (at 14.000 annotations)
+```
+
+#### Heath_map
+
+```{r}
+# FungalTraits x Microeco
+# Calculating percentage coverage and making a heatmap
+Meco_ITS_Func$cal_spe_func_perc(abundance_weighted = TRUE, perc = FALSE, dec = 8)
+FuncITSPerc     <- as.data.frame(Meco_ITS_Func$res_spe_func_perc)
+
+## extracting ordination coordinates and calculating radial theta
+OrdITSTest      <- Meco_ITS_Rare$clone()
+OrdITSTest$cal_betadiv(method = "bray")
+OrdITSBeta      <- trans_beta$new(dataset = OrdITSTest, group = "topology", measure = "bray")
+OrdITSBeta$cal_ordination(method = "PCoA")
+Scores          <- scores(OrdITSBeta$res_ordination, choices = c(1,2), display = "sites")
+OrderITS        <- OrdITSTest$sample_names()[order(radial_theta(Scores))]
+
+rm(OrdITSTest, OrdITSBeta, Scores)
+
+Meco_ITS_Func$plot_spe_func_perc(add_facet = TRUE,
+                                 order_x = OrderITS)+
+    scale_fill_gradient2(mid = "#FFCC99", high = "#1A0D00", na.value = "#FF0000")+
+    labs(title = "Heatmap of functional diversity (ITS data)")
+ggsave("ASV_ITS_Func_Heat_test.png", device = png, width = 2000, height = 1500, units = "px", dpi = 144, limitsize = FALSE)
+ggsave("ASV_ITS_Func_Heat2.png", device = png, width = 6000, height = 1500, units = "px", dpi = 144, limitsize = FALSE)
+# note that B077 on the right 10th percentile has very low fungal species richness and low functional percentages
+
+# Merged By city and topology
+Meco_ITS_Funcx  <- Meco_ITS_Rare$merge_samples("topology")
+Meco_ITS_Funcx  <- trans_func$new(Meco_ITS_Funcx)
+
+Meco_ITS_Funcx$cal_spe_func(fungi_database = "FungalTraits")
+FuncITSx         <- as.data.frame(Meco_ITS_Funcx$res_spe_func)
+
+Meco_ITS_Funcx$cal_spe_func_perc(abundance_weighted = TRUE, perc = FALSE, dec = 8)
+FuncITSxPerc     <- as.data.frame(Meco_ITS_Funcx$res_spe_func_perc)
+
+# Order in the court
+OrdITSTest      <- Meco_ITS_Rare$clone()
+OrdITSTest      <- OrdITSTest$merge_samples("topology")
+OrdITSTest$cal_betadiv(method = "bray")
+OrdITSBeta      <- trans_beta$new(dataset = OrdITSTest, measure = "bray")
+OrdITSBeta$cal_ordination(method = "PCoA")
+Scores          <- scores(OrdITSBeta$res_ordination, choices = c(1,2), display = "sites")
+OrderITSGroup   <- OrdITSTest$sample_names()[order(radial_theta(Scores))]
+
+rm(OrdITSTest, OrdITSBeta, Scores)
+
+Meco_ITS_Funcx$plot_spe_func_perc(add_facet = TRUE,
+                                 order_x = OrderITSGroup) +
+    scale_fill_gradient2(mid = "#FFCC99", high = "#1A0D00", na.value = "#FF0000")+
+    labs(title = "Heatmap of functional diversity grouped by substrate (ITS data)")
+
+
+ggsave("ASV_ITS_Func_city_and_topology_test.png", device = png, width = 2000, height = 1500, units = "px", dpi = 144, limitsize = FALSE)
+
+
+# Merged By topology
+Meco_ITS_Funcx  <- Meco_ITS_Rare$merge_samples("topology")
+Meco_ITS_Funcx  <- trans_func$new(Meco_ITS_Funcx)
+
+Meco_ITS_Funcx$cal_spe_func(fungi_database = "FungalTraits")
+FuncITSx         <- as.data.frame(Meco_ITS_Funcx$res_spe_func)
+
+Meco_ITS_Funcx$cal_spe_func_perc(abundance_weighted = TRUE, perc = FALSE, dec = 8)
+FuncITSxPerc     <- as.data.frame(Meco_ITS_Funcx$res_spe_func_perc)
+
+# Order in the court
+OrdITSTest      <- Meco_ITS_Rare$clone()
+OrdITSTest      <- OrdITSTest$merge_samples("topology")
+
+OrdITSTest$cal_betadiv(method = "jaccard")
+OrdITSBeta      <- trans_beta$new(dataset = OrdITSTest, measure = "jaccard")
+OrdITSBeta$cal_ordination(method = "PCoA")
+Scores          <- scores(OrdITSBeta$res_ordination, choices = c(1,2), display = "sites")
+OrderITSGroup   <- OrdITSTest$sample_names()[order(radial_theta(Scores))]
+
+rm(OrdITSTest, OrdITSBeta, Scores)
+
+
+```
+
+#### Statistics
+
+```{r}
+# Assuming your function table is `func_table` and metadata is `meta_table`
+# Ensure rows in func_table match sample order in meta_table
+func_table <- FuncITSPerc[rownames(physeq_fungal_only@sam_data), ]
+category <- as.factor(physeq_fungal_only@sam_data$city)
+
+# Run Kruskal-Wallis test for each function
+kw_results <- apply(func_table, 2, function(x) kruskal.test(x ~ category)$p.value)
+
+# Adjust p-values for multiple testing (e.g., Benjamini-Hochberg)
+kw_results_adj <- p.adjust(kw_results, method = "BH")
+
+# View top significant functions
+signif_functions <- sort(kw_results_adj[kw_results_adj < 0.05])
+names(signif_functions)
+str(names(signif_functions))
+func_table_signif <- func_table[,names(signif_functions)]
+
+library(rstatix)
+
+func_table_signif_merge <-  merge(func_table_signif,phy_rare@sam_data,by="row.names",all.x=TRUE)
+rownames(func_table_signif_merge) <- func_table_signif_merge$Row.names
+func_table$Row.names <- NULL
+names(func_table_signif_merge) <- make.names(names(func_table_signif_merge))
+names(func_table_signif) <- make.names(names(func_table_signif))
+results_list <- list()
+for (func in colnames(func_table_signif)) {
+  print(func)
+  # Perform pairwise test
+  test <- func_table_signif_merge %>%
+    dunn_test(as.formula(paste(func, "~ topology")), p.adjust.method = "BH") %>%
+    add_significance()
+  
+  # Add median direction info
+  median_vals <- func_table_signif_merge %>%
+    group_by(topology) %>%
+    summarise(med = median(.data[[func]], na.rm = TRUE))
+  
+  test <- test %>%
+    left_join(median_vals, by = c("group1" = "topology")) %>%
+    rename(med1 = med) %>%
+    left_join(median_vals, by = c("group2" = "topology")) %>%
+    rename(med2 = med) %>%
+    mutate(direction = case_when(
+      p.adj < 0.05 & med1 > med2 ~ paste(group1, ">", group2),
+      p.adj < 0.05 & med1 < med2 ~ paste(group1, "<", group2),
+      TRUE ~ "NS"
+    )) %>%
+    mutate(Function = func)
+  
+  results_list[[func]] <- test
+}
+
+# Combine all test results
+all_results <- bind_rows(results_list)
+
+write.csv(all_results,"ITS_pairwise_comparison_functions.csv")
+
+```
+
+Run after stats
+
+```{r}
+# Meco_ITS_Funcx$plot_spe_func_perc(add_facet = TRUE,
+#                                  order_x = OrderITSGroup) +
+#     scale_fill_gradient2(mid = "#FFCC99", high = "#1A0D00", na.value = "#FF0010")+
+#     labs(title = "Heatmap of functional diversity grouped by substrate (ITS data)")
+bold_labels <- function(labels, to_bold) {
+  sapply(labels, function(label) {
+    if (label %in% to_bold) {
+      label <- paste0("*", label)
+      bquote(bold(.(label)))
+    } else {
+      bquote(.(label))
+    }
+  }, simplify = FALSE)
+}
+
+rows_to_make_bold <- sub(".*\\|", "", names(signif_functions))
+intersect(colnames(Meco_ITS_Funcx$res_spe_func), rows_to_make_bold)
+clean_labels <- sub(".*\\|", "", colnames(Meco_ITS_Funcx$res_spe_func))
+sig_funcs <- intersect(rows_to_make_bold, colnames(Meco_ITS_Funcx$res_spe_func))
+
+sig_matrix <- Meco_ITS_Funcx$res_spe_func[, sig_funcs, drop = FALSE]
+
+tmp <- Meco_ITS_Funcx
+tmp$res_spe_func <- sig_matrix
+
+
+tmp$plot_spe_func_perc(add_facet = TRUE,
+                       order_x = c("Treepit", "Sidewalk_with_trees", "Street_with_trees", "Sidewalk_without_trees", "Street_without_trees")) +
+  scale_fill_viridis(
+    option = "viridis",
+    values = rescale(c(0, 0.1, 0.4, 0.8)),
+    labels = scales::label_percent(accuracy = 0.5),
+    na.value = "white",
+    direction = 1,
+    guide = guide_colorbar(barheight = 40, barwidth = 1)
+  ) +
+  labs(title = "Heatmap of significant functional diversity (ITS data)") +
+  theme(
+    axis.text.y = element_text(size = 14)   # increase function label size
+  )
+
+ggsave("ASV_ITS_Functopology_viridis_significant_only.png", device = png, width = 15, height = 26, units = "in", dpi = 144, limitsize = FALSE)
+```
+
+```{r}
+rows_to_keep <- unique(rows_to_make_bold)
+
+tmp <- Meco_ITS_Funcx
+tmp$res_spe_func <- Meco_ITS_Funcx$res_spe_func[, 
+                     colnames(Meco_ITS_Funcx$res_spe_func) %in% rows_to_keep]
+
+tmp$plot_spe_func_perc(add_facet = TRUE,
+                       order_x = OrderITSGroup) +
+  scale_fill_viridis(
+    option = "viridis",
+    values = rescale(c(0, 0.1, 0.3, 0.8)),
+    labels = scales::label_percent(accuracy = 0.1),
+    na.value = "white",
+    direction = 1,
+    guide = guide_colorbar(barheight = 40, barwidth = 1)
+  ) +
+  labs(title = "Heatmap of significant functional diversity grouped by topology (ITS data)") +
+  theme(axis.text.y = element_text(size = 14))
+
+ggsave("ASV_ITS_Functopology_viridis_significant_only_test.png", device = png, width = 15, height = 26, units = "in", dpi = 144, limitsize = FALSE)
+```
