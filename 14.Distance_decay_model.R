@@ -1,4 +1,4 @@
-setwd("G:/My Drive/CityDeal/Data_analysis_after_review/")
+setwd("path")
 library(vegan)
 library(geosphere)
 library(ggplot2)
@@ -224,3 +224,4 @@ ggplot(df_within_soil,
   )
 ggsave("./ITS_Distance_decay_model.png",width = 15, height = 10, units = "in", dpi = 600)
 #ggsave("./S16_Distance_decay_model.png",width = 15, height = 10, units = "in", dpi = 600)
+
